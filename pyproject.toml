@@ -9,7 +9,7 @@ description = "Static hybrid SPLADE and BM25 search for Sphinx documentation."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Arvind", "arvindajaybharadwaj23@gmail.com" }]
+authors = [{ name = "Arvind", email = "arvindajaybharadwaj23@gmail.com" }]
 classifiers = [
   "Framework :: Sphinx :: Extension",
   "Programming Language :: Python :: 3",

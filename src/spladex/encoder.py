@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -71,12 +72,14 @@ def build_inverted_index(documents: list[dict[str, Any]]) -> dict[str, list[list
 
 
 def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]:
-    """Load static query weights and the matching tokenizer vocabulary.
+    """Bundle the query tokenizer and learned weights at build time.
 
-    The browser uses the generated JSON for local WordPiece tokenization and
-    query weighting; it never downloads or executes the Transformer model.
+    The browser reads the resulting local documentation asset only; it never
+    fetches model files from Hugging Face or executes the Transformer model.
     """
     weight_path = hf_hub_download(repo_id=model_name, filename="static_query_weights.pt")
+    tokenizer_path = hf_hub_download(repo_id=model_name, filename="tokenizer.json")
+    config_path = hf_hub_download(repo_id=model_name, filename="tokenizer_config.json")
     payload = torch.load(Path(weight_path), map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or "query_weights" not in payload:
         raise ValueError("static_query_weights.pt must contain query_weights")
@@ -87,15 +90,17 @@ def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]
     if len(weights) != tokenizer.vocab_size:
         raise ValueError("static query weights and tokenizer vocabulary sizes differ")
 
+    tokenizer_json = json.loads(Path(tokenizer_path).read_text(encoding="utf-8"))
+    tokenizer_config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    vocabulary = tokenizer_json.get("model", {}).get("vocab")
+    if not isinstance(vocabulary, dict) or len(vocabulary) != tokenizer.vocab_size:
+        raise ValueError("tokenizer.json vocabulary and loaded tokenizer differ")
+
     return {
         "version": "1",
         "kind": "learned-static-query-weights",
-        "tokenizer": {
-            "type": "wordpiece",
-            "do_lower_case": bool(getattr(tokenizer, "do_lower_case", True)),
-            "vocab": tokenizer.get_vocab(),
-            "unknown_token": tokenizer.unk_token,
-        },
+        "tokenizer_json": tokenizer_json,
+        "tokenizer_config": tokenizer_config,
         "weights": [round(float(weight), 6) for weight in weights.tolist()],
         "special_token_ids": payload.get("special_token_ids", tokenizer.all_special_ids),
     }

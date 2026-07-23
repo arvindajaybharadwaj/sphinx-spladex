@@ -1,6 +1,11 @@
 __pycache__/
 .pytest_cache/
 demo/_build/
+demo_numpy/_build/
+demo_numpy_full/
+build/
+dist/
+*.egg-info/
+.venv/
 *.pyc
 .DS_Store
-

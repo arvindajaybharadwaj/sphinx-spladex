@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 authors = [
   { name = "Arvind", email = "arvindajaybharadwaj23@gmail.com" },
   { name = "Akshat Sharma", email = "akshatomega@gmail.com" },
+  { name = "Ananya Rajashekar", email = "ananya0106br@gmail.com" },
 ]
 classifiers = [
   "Framework :: Sphinx :: Extension",

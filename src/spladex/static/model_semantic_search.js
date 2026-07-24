@@ -270,7 +270,9 @@
   }
 
   document.addEventListener("DOMContentLoaded", function () {
-    if (window.location.pathname.endsWith("search.html")) {
+    const path = window.location.pathname;
+    // Match both html builder ("…/search.html") and dirhtml builder ("…/search/")
+    if (path.endsWith("search.html") || path.endsWith("/search/") || path.endsWith("/search")) {
       runSearch().catch(console.error);
     }
   });

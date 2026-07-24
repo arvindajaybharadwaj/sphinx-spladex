@@ -8,11 +8,24 @@ version = "0.1.0"
 description = "Static hybrid SPLADE and BM25 search for Sphinx documentation."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Arvind", email = "arvindajaybharadwaj23@gmail.com" }]
+license = { file = "LICENSE" }
+authors = [
+  { name = "Arvind", email = "arvindajaybharadwaj23@gmail.com" },
+  { name = "Akshat Sharma", email = "akshatomega@gmail.com" },
+]
 classifiers = [
   "Framework :: Sphinx :: Extension",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Documentation",
+  "Topic :: Documentation :: Sphinx",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
 ]
 dependencies = [
   "sphinx>=7",
@@ -20,6 +33,10 @@ dependencies = [
   "transformers>=4.40",
   "huggingface-hub>=0.22",
 ]
+
+[project.urls]
+Homepage = "https://github.com/arvindajaybharadwaj/sphinx-spladex"
+Repository = "https://github.com/arvindajaybharadwaj/sphinx-spladex"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -36,7 +53,7 @@ spladex = "spladex"
 packages = ["src/spladex"]
 
 [tool.hatch.build]
-include = ["src/spladex/static/*.js"]
+include = ["src/spladex/static/*.js", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -269,29 +269,7 @@
     }
   }
 
-  function interceptSearchForm() {
-    const input = findSearchInput();
-    if (!input) return;
-
-    const form = input.closest("form");
-    if (!form) return;
-
-    form.addEventListener("submit", function (event) {
-      event.preventDefault();
-
-      const query = input.value || "";
-      const url = new URL(window.location.href);
-
-      url.pathname = url.pathname.replace(/[^/]*$/, "search.html");
-      url.searchParams.set("q", query);
-
-      window.location.href = url.toString();
-    });
-  }
-
   document.addEventListener("DOMContentLoaded", function () {
-    interceptSearchForm();
-
     if (window.location.pathname.endsWith("search.html")) {
       runSearch().catch(console.error);
     }

@@ -1,5 +1,4 @@
 (function () {
-  let cachedIndex = null;
   let indexPromise = null;
   let queryAssetsPromise = null;
 
@@ -47,8 +46,14 @@
       return indexPromise;
     }
 
-    const urlRoot = (typeof DOCUMENTATION_OPTIONS !== "undefined" && DOCUMENTATION_OPTIONS.URL_ROOT) || "";
-    const indexUrl = new URL(urlRoot + "_static/model_semantic_index.json", window.location.href).toString();
+    const urlRoot =
+      (typeof DOCUMENTATION_OPTIONS !== "undefined" &&
+        DOCUMENTATION_OPTIONS.URL_ROOT) ||
+      "";
+    const indexUrl = new URL(
+      urlRoot + "_static/model_semantic_index.json",
+      window.location.href,
+    ).toString();
 
     indexPromise = fetch(indexUrl)
       .then((response) => {
@@ -57,19 +62,22 @@
         }
         return response.json();
       })
-      .then((index) => {
-        cachedIndex = index;
-        return index;
-      });
+      .then((index) => index);
 
     return indexPromise;
   }
 
   function loadQueryAssets(index) {
     if (queryAssetsPromise) return queryAssetsPromise;
-    const urlRoot = (typeof DOCUMENTATION_OPTIONS !== "undefined" && DOCUMENTATION_OPTIONS.URL_ROOT) || "";
+    const urlRoot =
+      (typeof DOCUMENTATION_OPTIONS !== "undefined" &&
+        DOCUMENTATION_OPTIONS.URL_ROOT) ||
+      "";
     const assetName = index.query_assets || "model_static_query_assets.json";
-    const assetUrl = new URL(urlRoot + "_static/" + assetName, window.location.href).toString();
+    const assetUrl = new URL(
+      urlRoot + "_static/" + assetName,
+      window.location.href,
+    ).toString();
     queryAssetsPromise = fetch(assetUrl).then((response) => {
       if (!response.ok) throw new Error("Failed to load static query weights");
       return response.json();
@@ -111,7 +119,8 @@
   }
 
   function searchLocalIndex(index, queryAssets, query, topK = 10) {
-    const terms = query.toLowerCase()
+    const terms = query
+      .toLowerCase()
       .replace(/[^\w\s_]/g, " ")
       .split(/\s+/)
       .filter((t) => t.length > 0);
@@ -130,7 +139,8 @@
       if (queryWeight <= 0) continue;
       const postings = invertedIndex[term] || [];
       for (const [docId, documentWeight] of postings) {
-        semanticScores[docId] = (semanticScores[docId] || 0.0) + queryWeight * documentWeight;
+        semanticScores[docId] =
+          (semanticScores[docId] || 0.0) + queryWeight * documentWeight;
       }
     }
 
@@ -144,11 +154,16 @@
     for (const term of terms) {
       const postings = postingsByTerm[term] || [];
       if (!postings.length) continue;
-      const idf = Math.log(1 + (numDocuments - postings.length + 0.5) / (postings.length + 0.5));
+      const idf = Math.log(
+        1 + (numDocuments - postings.length + 0.5) / (postings.length + 0.5),
+      );
       for (const [docId, frequency] of postings) {
         const length = documentLengths[docId] || 0;
-        const denominator = frequency + k1 * (1 - b + b * length / averageLength);
-        bm25Scores[docId] = (bm25Scores[docId] || 0) + idf * (frequency * (k1 + 1)) / denominator;
+        const denominator =
+          frequency + k1 * (1 - b + (b * length) / averageLength);
+        bm25Scores[docId] =
+          (bm25Scores[docId] || 0) +
+          (idf * (frequency * (k1 + 1))) / denominator;
       }
     }
 
@@ -170,39 +185,26 @@
       console.warn("[SpladeX] Unknown fusion mode; using RRF", hybrid.fusion);
     }
 
-    const results = [];
-    for (const [docId, score] of Object.entries(scores)) {
-      const docInfo = index.documents[docId];
-      if (docInfo) {
-        results.push({
-          id: docId,
-          score: score,
-          title: docInfo.title,
-          url: docInfo.url,
-          text: docInfo.text,
-          granularity: docInfo.granularity,
-          object_type: docInfo.object_type,
-        });
-      }
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, topK);
+    return Object.entries(scores)
+      .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
+      .slice(0, topK)
+      .map(([docId]) => index.documents[docId])
+      .filter(Boolean);
   }
 
   function renderLoading(query) {
     const container = findResultsContainer();
     container.innerHTML = `
-      <h2>Searching</h2>
-      <p class="search-summary">Searching for <code>${escapeHtml(query)}</code>...</p>
+      <h1>Search</h1>
+      <p>Searching for <code>${escapeHtml(query)}</code>. Please wait...</p>
     `;
   }
 
   function renderError(query, error) {
     const container = findResultsContainer();
     container.innerHTML = `
-      <h2>Search Results</h2>
-      <p class="search-summary">Search is temporarily unavailable.</p>
+      <h1>Search</h1>
+      <p>Search is temporarily unavailable.</p>
     `;
     console.error("[SpladeX search error]", error);
   }
@@ -211,22 +213,19 @@
     const container = findResultsContainer();
 
     container.innerHTML = `
-      <h2>Search Results</h2>
-      <p class="search-summary"></p>
+      <h1>Search</h1>
+      <p>Search results for <code>${escapeHtml(query)}</code></p>
     `;
-    const summary = container.querySelector(".search-summary");
 
     if (!query.trim()) {
-      summary.textContent = "Type a query in the search box.";
+      container.innerHTML += "<p>Type a query in the search box.</p>";
       return;
     }
 
     if (results.length === 0) {
-      summary.textContent = "Your search did not match any documents.";
+      container.innerHTML += "<p>No results found.</p>";
       return;
     }
-
-    summary.textContent = `Search finished, found ${results.length} page(s) matching the search query.`;
 
     const list = document.createElement("ul");
     list.className = "search";
@@ -236,7 +235,7 @@
 
       item.innerHTML = `
         <a href="${escapeHtml(result.url)}">${escapeHtml(result.title)}</a>
-        <span>${escapeHtml(makeSnippet(result.text || ""))}</span>
+        <div class="context">${escapeHtml(makeSnippet(result.text || ""))}</div>
       `;
 
       list.appendChild(item);

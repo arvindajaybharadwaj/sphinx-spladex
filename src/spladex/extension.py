@@ -8,6 +8,8 @@ from typing import Any
 
 from docutils import nodes
 from sphinx import addnodes
+from sphinx.util import logging
+from sphinx.util.display import progress_message
 
 from .encoder import (
     SemanticSparseEncoder,
@@ -15,6 +17,8 @@ from .encoder import (
     build_inverted_index,
     build_static_query_assets,
 )
+
+logger = logging.getLogger("spladex")
 
 SUPPORTED_BUILDERS = {"html", "dirhtml"}
 
@@ -120,6 +124,16 @@ def on_env_purge_doc(app: Any, env: Any, docname: str) -> None:
         del env.model_semantic_records[docname]
 
 
+def on_env_merge_info(app: Any, env: Any, docnames: list[str], other_env: Any) -> None:
+    """Merge documentation records collected by parallel worker processes."""
+    if not hasattr(env, "model_semantic_records"):
+        env.model_semantic_records = {}
+    if hasattr(other_env, "model_semantic_records"):
+        for docname, doc_records in other_env.model_semantic_records.items():
+            if docname in docnames or docname not in env.model_semantic_records:
+                env.model_semantic_records[docname] = doc_records
+
+
 def on_doctree_read(app: Any, doctree: nodes.document) -> None:
     docname = app.env.docname
 
@@ -145,10 +159,10 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     # Copy JS script to built outputs _static directory
     out_static = Path(app.outdir) / "_static"
     out_static.mkdir(parents=True, exist_ok=True)
-    
+
     src_js = Path(__file__).resolve().parent / "static" / "model_semantic_search.js"
     dest_js = out_static / "model_semantic_search.js"
-    
+
     if src_js.exists():
         dest_js.write_text(src_js.read_text(encoding="utf-8"), encoding="utf-8")
 
@@ -176,53 +190,75 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     backend = getattr(app.config, "spladex_encoder_backend", None) or getattr(
         app.config, "semantic_search_encoder_backend", "auto"
     )
-    semantic_weight = getattr(app.config, "spladex_semantic_weight", 0.6)
-    bm25_weight = getattr(app.config, "spladex_bm25_weight", 0.4)
-    rrf_k = getattr(app.config, "spladex_rrf_k", 60)
-    if semantic_weight < 0 or bm25_weight < 0 or semantic_weight + bm25_weight == 0:
-        raise ValueError("spladex semantic and BM25 weights must be non-negative and not both zero")
-    if rrf_k <= 0:
-        raise ValueError("spladex_rrf_k must be greater than zero")
+    semantic_weight = float(getattr(app.config, "spladex_semantic_weight", 0.6))
+    bm25_weight = float(getattr(app.config, "spladex_bm25_weight", 0.4))
+    rrf_k = int(getattr(app.config, "spladex_rrf_k", 60))
 
-    records = []
+    if semantic_weight < 0 or bm25_weight < 0 or (semantic_weight == 0 and bm25_weight == 0):
+        logger.warning("Invalid spladex weights (semantic=%s, bm25=%s). Using defaults (0.6, 0.4).", semantic_weight, bm25_weight)
+        semantic_weight, bm25_weight = 0.6, 0.4
+    if rrf_k <= 0:
+        logger.warning("Invalid spladex_rrf_k (%s). Using default 60.", rrf_k)
+        rrf_k = 60
+
+    records: list[dict[str, Any]] = []
     if hasattr(app.env, "model_semantic_records"):
         for doc_records in app.env.model_semantic_records.values():
             records.extend(doc_records)
 
     if not records:
+        logger.info("[SpladeX] No documentation records found to index.")
         return
 
-    encoder = SemanticSparseEncoder(
-        model_name=model_name,
-        device=device,
-        max_length=max_length,
-        top_k=top_k_terms,
-        min_weight=min_weight,
-        backend=backend,
-    )
+    # Attempt to initialize SPLADE encoder
+    encoder: SemanticSparseEncoder | None = None
+    try:
+        encoder = SemanticSparseEncoder(
+            model_name=model_name,
+            device=device,
+            max_length=max_length,
+            top_k=top_k_terms,
+            min_weight=min_weight,
+            backend=backend,
+        )
+    except Exception as err:
+        logger.warning("[SpladeX] Neural SPLADE encoder initialization failed (%s). Indexing will fall back to BM25-only search.", err)
 
     documents: list[dict[str, Any]] = []
 
-    for record in records:
-        searchable_text = " ".join([record["title"], record["object_type"], record["text"]])
-        vector = encoder.encode(searchable_text)
+    with progress_message(f"[SpladeX] Encoding {len(records)} documentation records for search"):
+        for record in records:
+            searchable_text = " ".join([record["title"], record["object_type"], record["text"]])
+            vector: dict[str, float] = {}
 
-        documents.append(
-            {
-                "id": record["id"],
-                "title": record["title"],
-                "url": record["url"],
-                "text": record["text"][:1000],
-                "granularity": record["granularity"],
-                "object_type": record["object_type"],
-                "searchable_text": searchable_text,
-                "vector": vector,
-            }
-        )
+            if encoder is not None:
+                try:
+                    vector = encoder.encode(searchable_text)
+                except Exception as err:
+                    logger.warning("[SpladeX] Encoding failed for record '%s': %s", record.get("id"), err)
+
+            documents.append(
+                {
+                    "id": record["id"],
+                    "title": record["title"],
+                    "url": record["url"],
+                    "text": record["text"][:1000],
+                    "granularity": record["granularity"],
+                    "object_type": record["object_type"],
+                    "searchable_text": searchable_text,
+                    "vector": vector,
+                }
+            )
 
     inverted_index = build_inverted_index(documents)
     bm25_index = build_bm25_index(documents)
-    query_assets = build_static_query_assets(model_name, encoder.tokenizer)
+
+    query_assets: dict[str, Any] = {}
+    if encoder is not None:
+        try:
+            query_assets = build_static_query_assets(model_name, encoder.tokenizer)
+        except Exception as err:
+            logger.warning("[SpladeX] Failed to build static query assets: %s", err)
 
     index = {
         "version": "0.3",
@@ -266,6 +302,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     (out_static / "model_static_query_assets.json").write_text(
         json.dumps(query_assets, separators=(",", ":")), encoding="utf-8"
     )
+    logger.info("[SpladeX] Successfully built semantic index at %s", index_path)
 
 
 def setup(app: Any) -> dict[str, Any]:
@@ -290,11 +327,12 @@ def setup(app: Any) -> dict[str, Any]:
 
     app.connect("builder-inited", on_builder_inited)
     app.connect("env-purge-doc", on_env_purge_doc)
+    app.connect("env-merge-info", on_env_merge_info)
     app.connect("doctree-read", on_doctree_read)
     app.connect("build-finished", on_build_finished)
 
     return {
         "version": "0.1.0",
-        "parallel_read_safe": False,
-        "parallel_write_safe": False,
+        "parallel_read_safe": True,
+        "parallel_write_safe": True,
     }

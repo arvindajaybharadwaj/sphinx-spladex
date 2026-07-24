@@ -8,7 +8,7 @@ from typing import Any
 
 from .extension import setup as extension_setup
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def setup(app: Any) -> dict[str, Any]:

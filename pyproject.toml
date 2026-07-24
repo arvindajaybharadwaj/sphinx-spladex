@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sphinx-spladex"
-version = "0.1.0"
+version = "0.1.1"
 description = "Static hybrid SPLADE and BM25 search for Sphinx documentation."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -53,8 +53,12 @@ spladex = "spladex"
 [tool.hatch.build.targets.wheel]
 packages = ["src/spladex"]
 
-[tool.hatch.build]
-include = ["src/spladex/static/*.js", "LICENSE"]
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src/spladex",
+  "/LICENSE",
+  "/README.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -32,6 +32,8 @@ The default model is `Arvind0101/static-query-splade-code-docs`. The model must
 include a `static_query_weights.pt` file containing a one-dimensional
 `query_weights` tensor matching the tokenizer vocabulary.
 
+Other models trained on the same pipeline with slightly expanded corpus include: `Akshat131/splade-multi-static-pruned-v2` , `Akshat131/static-splade-trained-pruned`
+
 ```python
 spladex_model_name = "Arvind0101/static-query-splade-code-docs"
 spladex_device = "cpu"

@@ -36,7 +36,6 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/arvindajaybharadwaj/sphinx-spladex"
 Repository = "https://github.com/arvindajaybharadwaj/sphinx-spladex"
 
 [project.optional-dependencies]

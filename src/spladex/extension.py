@@ -201,6 +201,14 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         logger.warning("Invalid spladex_rrf_k (%s). Using default 60.", rrf_k)
         rrf_k = 60
 
+    # UI Theme & Customization Configs
+    results_per_page = int(getattr(app.config, "spladex_results_per_page", 10))
+    highlight_color = str(getattr(app.config, "spladex_highlight_color", "#fff3a0"))
+    accent_color = str(getattr(app.config, "spladex_accent_color", "#0066cc"))
+    badge_style = str(getattr(app.config, "spladex_badge_style", "pill"))
+    enable_keyboard_shortcut = bool(getattr(app.config, "spladex_enable_keyboard_shortcut", True))
+    enable_live_search = bool(getattr(app.config, "spladex_enable_live_search", True))
+
     records: list[dict[str, Any]] = []
     if hasattr(app.env, "model_semantic_records"):
         for doc_records in app.env.model_semantic_records.values():
@@ -277,6 +285,14 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             "bm25_weight": bm25_weight,
             "rrf_k": rrf_k,
         },
+        "ui_config": {
+            "results_per_page": results_per_page,
+            "highlight_color": highlight_color,
+            "accent_color": accent_color,
+            "badge_style": badge_style,
+            "enable_keyboard_shortcut": enable_keyboard_shortcut,
+            "enable_live_search": enable_live_search,
+        },
         "query_assets": "model_static_query_assets.json",
         "stats": {
             "num_documents": len(documents),
@@ -316,6 +332,14 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_semantic_weight", 0.6, "html")
     app.add_config_value("spladex_bm25_weight", 0.4, "html")
     app.add_config_value("spladex_rrf_k", 60, "html")
+
+    # UI Theme & Customization Configs
+    app.add_config_value("spladex_results_per_page", 10, "html")
+    app.add_config_value("spladex_highlight_color", "#fff3a0", "html")
+    app.add_config_value("spladex_accent_color", "#0066cc", "html")
+    app.add_config_value("spladex_badge_style", "pill", "html")
+    app.add_config_value("spladex_enable_keyboard_shortcut", True, "html")
+    app.add_config_value("spladex_enable_live_search", True, "html")
 
     # Backwards compatibility configs
     app.add_config_value("semantic_search_model_name", "Arvind0101/static-query-splade-code-docs", "html")

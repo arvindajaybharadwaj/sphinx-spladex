@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -34,8 +36,9 @@ Python semantic search with BM25 and SPLADE.
 """.strip()
     )
 
+    cmd = [shutil.which("sphinx-build") or "sphinx-build"] if shutil.which("sphinx-build") else [sys.executable, "-m", "sphinx.cmd.build"]
     subprocess.run(
-        ["sphinx-build", "-b", "html", "-E", str(docs), str(output)],
+        [*cmd, "-b", "html", "-E", str(docs), str(output)],
         check=True,
     )
 
@@ -46,4 +49,5 @@ Python semantic search with BM25 and SPLADE.
     assert (static / "model_semantic_search.js").exists()
     assert index["hybrid"]["fusion"] == "rrf"
     assert index["query_assets"] == "model_static_query_assets.json"
+    assert "ui_config" in index
     assert assets["kind"] == "learned-static-query-weights"

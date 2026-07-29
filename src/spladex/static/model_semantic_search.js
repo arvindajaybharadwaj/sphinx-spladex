@@ -295,12 +295,82 @@
     console.error("[SpladeX search error]", error);
   }
 
+  function applyThemeStyles(uiConfig) {
+    if (document.getElementById("spladex-theme-styles")) return;
+    const accent = (uiConfig && uiConfig.accent_color) || "#0066cc";
+    const highlight = (uiConfig && uiConfig.highlight_color) || "#fff3a0";
+    const badgeStyle = (uiConfig && uiConfig.badge_style) || "pill";
+
+    const style = document.createElement("style");
+    style.id = "spladex-theme-styles";
+    style.textContent = `
+      :root {
+        --spladex-accent: ${accent};
+        --spladex-highlight-bg: ${highlight};
+      }
+      .spladex-badge {
+        display: ${badgeStyle === "none" ? "none" : "inline-block"};
+        font-size: 0.72em;
+        font-weight: 600;
+        padding: 2px 7px;
+        margin-left: 8px;
+        border-radius: ${badgeStyle === "pill" ? "12px" : "3px"};
+        background-color: var(--spladex-accent);
+        color: #ffffff;
+        vertical-align: middle;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        line-height: 1.2;
+      }
+      .spladex-highlight {
+        background-color: var(--spladex-highlight-bg);
+        padding: 1px 3px;
+        border-radius: 2px;
+      }
+      .spladex-pagination a {
+        color: var(--spladex-accent);
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function initKeyboardShortcuts(uiConfig) {
+    if (!uiConfig || uiConfig.enable_keyboard_shortcut === false) return;
+    document.addEventListener("keydown", function (e) {
+      const activeElement = document.activeElement;
+      const isInput =
+        activeElement &&
+        (activeElement.tagName === "INPUT" ||
+          activeElement.tagName === "TEXTAREA" ||
+          activeElement.isContentEditable);
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        const input = findSearchInput();
+        if (input) input.focus();
+      } else if (e.key === "/" && !isInput) {
+        e.preventDefault();
+        const input = findSearchInput();
+        if (input) input.focus();
+      }
+    });
+  }
+
+  let currentUiConfig = {
+    results_per_page: 10,
+    highlight_color: "#fff3a0",
+    accent_color: "#0066cc",
+    badge_style: "pill",
+    enable_keyboard_shortcut: true,
+    enable_live_search: true,
+  };
+
   let currentPage = 1;
-  const RESULTS_PER_PAGE = 10;
 
   function renderResults(query, results, page = 1) {
     currentPage = page;
     const container = findResultsContainer();
+    const resultsPerPage = (currentUiConfig && currentUiConfig.results_per_page) || 10;
 
     container.innerHTML = `
       <h1>Search</h1>
@@ -317,18 +387,21 @@
       return;
     }
 
-    const totalPages = Math.ceil(results.length / RESULTS_PER_PAGE);
-    const startIdx = (page - 1) * RESULTS_PER_PAGE;
-    const pageResults = results.slice(startIdx, startIdx + RESULTS_PER_PAGE);
+    const totalPages = Math.ceil(results.length / resultsPerPage);
+    const startIdx = (page - 1) * resultsPerPage;
+    const pageResults = results.slice(startIdx, startIdx + resultsPerPage);
 
     const list = document.createElement("ul");
     list.className = "search";
 
     for (const result of pageResults) {
       const item = document.createElement("li");
+      const badgeHtml = result.object_type
+        ? `<span class="spladex-badge">${escapeHtml(result.object_type)}</span>`
+        : "";
 
       item.innerHTML = `
-        <a href="${escapeHtml(result.url)}">${escapeHtml(result.title)}</a>
+        <a href="${escapeHtml(result.url)}">${escapeHtml(result.title)}</a>${badgeHtml}
         <div class="context">${escapeHtml(makeSnippet(result.text || ""))}</div>
       `;
 
@@ -343,12 +416,12 @@
       nav.className = "spladex-pagination";
       nav.style.cssText = "margin-top: 20px; margin-bottom: 20px; font-size: 0.95em;";
 
-      let navHtml = '<p style="display: flex; gap: 15px; align-items: center;">';
+      let navHtml = '<p style="display: flex; gap: 15px; align-items: center; margin: 0;">';
 
       if (page > 1) {
         navHtml += `<a href="#" id="spladex-prev" style="text-decoration: underline;">&laquo; Previous</a>`;
       } else {
-        navHtml += `<span style="color: #888;">&laquo; Previous</span>`;
+        navHtml += `<span style="opacity: 0.5; cursor: not-allowed; user-select: none;">&laquo; Previous</span>`;
       }
 
       navHtml += `<span>Page ${page} of ${totalPages} (${results.length} results)</span>`;
@@ -356,7 +429,7 @@
       if (page < totalPages) {
         navHtml += `<a href="#" id="spladex-next" style="text-decoration: underline;">Next &raquo;</a>`;
       } else {
-        navHtml += `<span style="color: #888;">Next &raquo;</span>`;
+        navHtml += `<span style="opacity: 0.5; cursor: not-allowed; user-select: none;">Next &raquo;</span>`;
       }
 
       navHtml += "</p>";
@@ -400,6 +473,12 @@
 
     try {
       const index = await loadIndex();
+      if (index.ui_config) {
+        currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
+      }
+      applyThemeStyles(currentUiConfig);
+      initKeyboardShortcuts(currentUiConfig);
+
       const queryAssets = await loadQueryAssets(index);
       const results = searchLocalIndex(index, queryAssets, query, 100);
       renderResults(query, results, 1);
@@ -410,6 +489,18 @@
 
   document.addEventListener("DOMContentLoaded", function () {
     const path = window.location.pathname;
+
+    // Load theme styles and keyboard shortcuts across all documentation pages if index is available
+    loadIndex()
+      .then((index) => {
+        if (index && index.ui_config) {
+          currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
+        }
+        applyThemeStyles(currentUiConfig);
+        initKeyboardShortcuts(currentUiConfig);
+      })
+      .catch(() => {});
+
     // Match both html builder ("…/search.html") and dirhtml builder ("…/search/")
     if (path.endsWith("search.html") || path.endsWith("/search/") || path.endsWith("/search")) {
       runSearch().catch(console.error);

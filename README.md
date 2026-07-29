@@ -43,6 +43,14 @@ spladex_min_weight = 0.0
 spladex_semantic_weight = 0.6
 spladex_bm25_weight = 0.4
 spladex_rrf_k = 60
+
+# UI Theme & Customization (Optional)
+spladex_results_per_page = 10
+spladex_highlight_color = "#fff3a0"
+spladex_accent_color = "#0066cc"
+spladex_badge_style = "pill"  # "pill", "subtle", or "none"
+spladex_enable_keyboard_shortcut = True  # Ctrl+K / /
+spladex_enable_live_search = True
 ```
 
 After `sphinx-build -b html docs docs/_build/html`, the generated site includes

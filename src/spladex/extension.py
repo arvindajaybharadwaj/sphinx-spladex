@@ -202,6 +202,22 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         logger.warning("Invalid spladex_rrf_k (%s). Using default 60.", rrf_k)
         rrf_k = 60
 
+    # Ranking heuristics. Defaults were chosen on unseen projects (Flutter, React); indexes built
+    # before these options existed keep the original client behaviour.
+    bm25_tokenizer = str(getattr(app.config, "spladex_bm25_tokenizer", "identifier"))
+    title_boost = str(getattr(app.config, "spladex_title_boost", "off"))
+    bm25_prefix_match = bool(getattr(app.config, "spladex_bm25_prefix_match", False))
+    dedupe = str(getattr(app.config, "spladex_dedupe", "exact"))
+    if bm25_tokenizer not in ("simple", "identifier"):
+        logger.warning("Invalid spladex_bm25_tokenizer (%s). Using 'identifier'.", bm25_tokenizer)
+        bm25_tokenizer = "identifier"
+    if title_boost not in ("always", "identifier", "off"):
+        logger.warning("Invalid spladex_title_boost (%s). Using 'off'.", title_boost)
+        title_boost = "off"
+    if dedupe not in ("aggressive", "exact"):
+        logger.warning("Invalid spladex_dedupe (%s). Using 'exact'.", dedupe)
+        dedupe = "exact"
+
     # UI Theme & Customization Configs
     results_per_page = int(getattr(app.config, "spladex_results_per_page", 10))
     highlight_color = str(getattr(app.config, "spladex_highlight_color", "#fff3a0"))
@@ -262,7 +278,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             )
 
     inverted_index = build_inverted_index(documents)
-    bm25_index = build_bm25_index(documents)
+    bm25_index = build_bm25_index(documents, tokenizer=bm25_tokenizer)
 
     query_assets: dict[str, Any] = {}
     if encoder is not None:
@@ -287,6 +303,9 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             "semantic_weight": semantic_weight,
             "bm25_weight": bm25_weight,
             "rrf_k": rrf_k,
+            "title_boost": title_boost,
+            "bm25_prefix_match": bm25_prefix_match,
+            "dedupe": dedupe,
         },
         "ui_config": {
             "results_per_page": results_per_page,
@@ -346,6 +365,10 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_bm25_weight", 0.4, "html")
     app.add_config_value("spladex_rrf_k", 60, "html")
     app.add_config_value("spladex_index_format", "compact", "html")
+    app.add_config_value("spladex_bm25_tokenizer", "identifier", "html")
+    app.add_config_value("spladex_title_boost", "off", "html")
+    app.add_config_value("spladex_bm25_prefix_match", False, "html")
+    app.add_config_value("spladex_dedupe", "exact", "html")
 
     # UI Theme & Customization Configs
     app.add_config_value("spladex_results_per_page", 10, "html")

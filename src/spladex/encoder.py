@@ -176,14 +176,35 @@ def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]
     }
 
 
-def tokenize_for_bm25(text: str) -> list[str]:
-    """Return a small, deterministic tokenizer suitable for a static index."""
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_.]+")
+_IDENTIFIER_SPLIT_RE = re.compile(r"[._]|(?<=[a-z])(?=[A-Z])")
+
+
+def tokenize_for_bm25(text: str, mode: str = "simple") -> list[str]:
+    """Return a small, deterministic tokenizer suitable for a static index.
+
+    ``simple`` lowercases and splits on non-word characters (the original behaviour).
+    ``identifier`` also keeps dotted names whole and adds their snake_case, camelCase and
+    dotted parts, so ``DataFrame.dropna`` yields ``dataframe.dropna``, ``data``, ``frame``,
+    ``dropna``. The browser client applies the same rules to queries.
+    """
     if not text:
         return []
-    return re.findall(r"[a-z0-9_]+", text.lower())
+    if mode != "identifier":
+        return re.findall(r"[a-z0-9_]+", text.lower())
+    tokens: list[str] = []
+    for word in _IDENTIFIER_RE.findall(text):
+        whole = word.strip(".").lower()
+        if not whole:
+            continue
+        tokens.append(whole)
+        parts = [part for part in _IDENTIFIER_SPLIT_RE.split(word) if part]
+        if len(parts) > 1:
+            tokens.extend(part.lower() for part in parts)
+    return tokens
 
 
-def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
+def build_bm25_index(documents: list[dict[str, Any]], tokenizer: str = "simple") -> dict[str, Any]:
     """Build a compact BM25 index consumed by the browser search client.
 
     Postings store a document id and term frequency. IDF and final scoring are
@@ -195,7 +216,7 @@ def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
 
     for doc in documents:
         searchable_text = doc.get("searchable_text") or ""
-        tokens = tokenize_for_bm25(searchable_text)
+        tokens = tokenize_for_bm25(searchable_text, tokenizer)
         doc_id = doc["id"]
         document_lengths[doc_id] = len(tokens)
         for term, frequency in Counter(tokens).items():
@@ -206,6 +227,7 @@ def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
         sum(document_lengths.values()) / num_documents if num_documents > 0 else 0.0
     )
     return {
+        "tokenizer": tokenizer,
         "k1": 1.2,
         "b": 0.75,
         "num_documents": num_documents,

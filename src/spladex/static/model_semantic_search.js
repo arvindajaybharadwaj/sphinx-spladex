@@ -71,9 +71,55 @@
     return Object.prototype.hasOwnProperty.call(store, term) ? store[term] : [];
   }
 
-  function getTerms(store) {
+  // Sorted term list per posting store, built once, so prefix matches use binary search
+  // instead of scanning the whole vocabulary for every query word.
+  const sortedTermCache = new WeakMap();
+
+  function getSortedTerms(store) {
     if (!store) return [];
-    return store.__lazy ? store.keys() : Object.keys(store);
+    let terms = sortedTermCache.get(store);
+    if (!terms) {
+      terms = (store.__lazy ? store.keys() : Object.keys(store)).slice().sort();
+      sortedTermCache.set(store, terms);
+    }
+    return terms;
+  }
+
+  // Terms equal to `term`, plus terms starting with `stem` when the stem has 4+ characters.
+  function matchIndexTerms(store, term, stem) {
+    const terms = getSortedTerms(store);
+    const matches = [];
+    const hasExact = store.__lazy ? store.get(term).length > 0 : Object.prototype.hasOwnProperty.call(store, term);
+    if (stem.length >= 4) {
+      let lo = 0;
+      let hi = terms.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (terms[mid] < stem) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < terms.length && terms[i].startsWith(stem); i++) matches.push(terms[i]);
+    }
+    if (hasExact && !matches.includes(term)) matches.push(term);
+    return matches;
+  }
+
+  // Mirrors spladex.encoder.tokenize_for_bm25(mode="identifier").
+  function identifierTokens(text) {
+    const tokens = [];
+    for (const word of text.match(/[A-Za-z0-9_.]+/g) || []) {
+      const whole = word.replace(/^\.+|\.+$/g, "").toLowerCase();
+      if (!whole) continue;
+      tokens.push(whole);
+      const parts = word.split(/[._]|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
+      if (parts.length > 1) tokens.push(...parts.map((p) => p.toLowerCase()));
+    }
+    return tokens;
+  }
+
+  function looksLikeIdentifier(query) {
+    const trimmed = query.trim();
+    return /[._()]|[a-z][A-Z]/.test(trimmed) || trimmed.split(/\s+/).length <= 2;
   }
 
   function normaliseIndex(index) {
@@ -95,6 +141,7 @@
     index.documents = documents;
     index.inverted_index = lazyPostings(index.splade.postings, ids, index.splade.scale);
     index.bm25_index = {
+      tokenizer: index.bm25.tokenizer,
       k1: index.bm25.k1,
       b: index.bm25.b,
       num_documents: index.bm25.num_documents,
@@ -203,12 +250,25 @@
       .split(/\s+/)
       .filter((t) => t.length > 0);
 
-    const semanticScores = {};
-    const bm25Scores = {};
-    const semanticMatched = {};
-    const bm25Matched = {};
-    const addMatch = (store, docId, term) => {
-      (store[docId] = store[docId] || new Set()).add(term);
+    // Scores are Maps (insertion-ordered, like the original objects). Matched terms are kept
+    // as a bitmask of query-term positions per document and decoded only for returned results.
+    const semanticScores = new Map();
+    const bm25Scores = new Map();
+    const semanticMatched = new Map();
+    const bm25Matched = new Map();
+    const semanticTermList = [];
+    const bm25TermList = [];
+    const markMatch = (store, termList, docId, term) => {
+      let bit = termList.indexOf(term);
+      if (bit === -1) {
+        bit = termList.length;
+        termList.push(term);
+      }
+      if (bit < 31) store.set(docId, (store.get(docId) || 0) | (1 << bit));
+    };
+    const decodeMatches = (store, termList, docId) => {
+      const mask = store.get(docId) || 0;
+      return termList.filter((_, bit) => bit < 31 && mask & (1 << bit));
     };
     const invertedIndex = index.inverted_index || {};
     const vocab = queryAssets.tokenizer.vocab || {};
@@ -221,10 +281,10 @@
       const queryWeight = weights[tokenId] || 0;
       if (queryWeight <= 0) continue;
       const postings = getPostings(invertedIndex, term);
+      const shown = term.replace(/^##/, "");
       for (const [docId, documentWeight] of postings) {
-        semanticScores[docId] =
-          (semanticScores[docId] || 0.0) + queryWeight * documentWeight;
-        addMatch(semanticMatched, docId, term.replace(/^##/, ""));
+        semanticScores.set(docId, (semanticScores.get(docId) || 0.0) + queryWeight * documentWeight);
+        markMatch(semanticMatched, semanticTermList, docId, shown);
       }
     }
 
@@ -234,8 +294,6 @@
       return w.replace(/(ing|ed|es|s|tion|able|ive)$/, "");
     }
 
-    const termStems = terms.map((t) => getStem(t)).filter((s) => s.length >= 3);
-
     const bm25 = index.bm25_index || {};
     const postingsByTerm = bm25.postings || {};
     const documentLengths = bm25.document_lengths || {};
@@ -243,20 +301,17 @@
     const averageLength = bm25.avg_document_length || 1;
     const k1 = bm25.k1 || 1.2;
     const b = bm25.b || 0.75;
+    // Indexes built with the identifier tokenizer get the same tokenisation for queries;
+    // bm25_prefix_match (default on, the original behaviour) also matches terms sharing a stem.
+    const bm25Terms = bm25.tokenizer === "identifier" ? Array.from(new Set(identifierTokens(query))) : terms;
+    const prefixMatch = (index.hybrid && index.hybrid.bm25_prefix_match) ?? true;
 
-    // Collect all candidate index terms matching either exact term or subword stem
-    const allIndexTerms = getTerms(postingsByTerm);
-
-    for (let i = 0; i < terms.length; i++) {
-      const term = terms[i];
-      const stem = termStems[i] || term;
+    for (let i = 0; i < bm25Terms.length; i++) {
+      const term = bm25Terms[i];
+      const stem = prefixMatch ? getStem(term) : "";
 
       // Find all index terms that match exact term or share the subword stem
-      const matchingIndexTerms = allIndexTerms.filter((idxTerm) => {
-        if (idxTerm === term) return true;
-        if (stem.length >= 4 && idxTerm.startsWith(stem)) return true;
-        return false;
-      });
+      const matchingIndexTerms = matchIndexTerms(postingsByTerm, term, stem);
 
       for (const matchedTerm of matchingIndexTerms) {
         const postings = getPostings(postingsByTerm, matchedTerm);
@@ -273,10 +328,11 @@
           const length = documentLengths[docId] || 0;
           const denominator =
             frequency + k1 * (1 - b + (b * length) / averageLength);
-          bm25Scores[docId] =
-            (bm25Scores[docId] || 0) +
-            matchWeight * ((idf * (frequency * (k1 + 1))) / denominator);
-          addMatch(bm25Matched, docId, term);
+          bm25Scores.set(
+            docId,
+            (bm25Scores.get(docId) || 0) + matchWeight * ((idf * (frequency * (k1 + 1))) / denominator),
+          );
+          markMatch(bm25Matched, bm25TermList, docId, term);
         }
       }
     }
@@ -285,12 +341,12 @@
     const semanticWeight = hybrid.semantic_weight ?? 0.6;
     const bm25Weight = hybrid.bm25_weight ?? 0.4;
     const rrfK = hybrid.rrf_k ?? 60;
-    let scores = {};
+    let scores = new Map();
     const addRrfScores = (channelScores, channelWeight) => {
-      const ranked = Object.entries(channelScores).sort((a, b) => b[1] - a[1]);
+      const ranked = Array.from(channelScores).sort((a, b) => b[1] - a[1]);
       ranked.forEach(([docId], position) => {
         const rank = position + 1;
-        scores[docId] = (scores[docId] || 0) + channelWeight / (rrfK + rank);
+        scores.set(docId, (scores.get(docId) || 0) + channelWeight / (rrfK + rank));
       });
     };
     if (mode === "semantic") {
@@ -303,34 +359,41 @@
     }
 
     // Universal exact symbol title boost: if query contains exact symbol name (e.g. 'reshape'), boost primary function
-    for (const [docId, doc] of mode === "hybrid" ? Object.entries(index.documents) : []) {
-      if (scores[docId] && doc) {
+    // title_boost: "always" (legacy behaviour), "identifier" (only for code-like queries) or "off"
+    const titleBoost = hybrid.title_boost || "always";
+    const applyTitleBoost =
+      mode === "hybrid" && (titleBoost === "always" || (titleBoost === "identifier" && looksLikeIdentifier(query)));
+    for (const [docId, score] of applyTitleBoost ? Array.from(scores) : []) {
+      const doc = index.documents[docId];
+      if (score && doc) {
         const titleLower = (doc.title || "").toLowerCase();
         const parts = titleLower.split(".");
         const shortName = parts[parts.length - 1];
 
+        let boosted = score;
         for (const term of terms) {
           if (shortName === term) {
             // Give 1.5x boost if title shortName matches exact query term
-            scores[docId] *= 1.5;
+            boosted *= 1.5;
             // Additional boost for top-level functions over subclass methods
             if (doc.object_type === "function") {
-              scores[docId] *= 1.25;
+              boosted *= 1.25;
             }
           }
         }
+        scores.set(docId, boosted);
       }
     }
 
-    const sortedDocs = Object.entries(scores)
+    const sortedDocs = Array.from(scores)
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, 50) // Cap at top 50 candidate documents
       .map(([docId]) => {
         const doc = index.documents[docId];
         if (!doc) return null;
         const matched = new Set([
-          ...(mode !== "lexical" ? semanticMatched[docId] || [] : []),
-          ...(mode !== "semantic" ? bm25Matched[docId] || [] : []),
+          ...(mode !== "lexical" ? decodeMatches(semanticMatched, semanticTermList, docId) : []),
+          ...(mode !== "semantic" ? decodeMatches(bm25Matched, bm25TermList, docId) : []),
         ]);
         return Object.assign({}, doc, { matched: Array.from(matched) });
       })
@@ -360,7 +423,9 @@
       }
 
       // 3. Skip duplicate subclass method clones sharing the exact same method shortname
-      if (doc.granularity === "object" && shortName && seenShortNames.has(shortName)) {
+      //    (dedupe: "aggressive", the original behaviour; "exact" keeps only rules 1 and 2)
+      const dedupeMode = (index.hybrid && index.hybrid.dedupe) || "aggressive";
+      if (dedupeMode === "aggressive" && doc.granularity === "object" && shortName && seenShortNames.has(shortName)) {
         const count = Array.from(seenShortNames.values()).filter((n) => n === shortName).length;
         if (count >= 1) continue;
       }

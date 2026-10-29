@@ -84,6 +84,7 @@ def build_compact_index(
             "postings": compact_postings(inverted_index, doc_index, scale=scale),
         },
         "bm25": {
+            "tokenizer": bm25_index.get("tokenizer", "simple"),
             "k1": bm25_index.get("k1", 1.2),
             "b": bm25_index.get("b", 0.75),
             "num_documents": bm25_index.get("num_documents", len(documents)),

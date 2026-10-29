@@ -138,7 +138,12 @@ def _load_idf_json_weights(model_name: str, tokenizer: Any) -> list[float] | Non
         return None
     import json
 
-    idf = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        idf = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(idf, dict):
+        return None
     weights = [0.0] * tokenizer.vocab_size
     for token, value in idf.items():
         token_id = tokenizer.convert_tokens_to_ids(token)

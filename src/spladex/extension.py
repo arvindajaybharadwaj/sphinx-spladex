@@ -11,6 +11,7 @@ from sphinx import addnodes
 from sphinx.util import logging
 from sphinx.util.display import progress_message
 
+from .compact import build_compact_index, compact_query_assets
 from .encoder import (
     SemanticSparseEncoder,
     build_bm25_index,
@@ -208,6 +209,8 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     badge_style = str(getattr(app.config, "spladex_badge_style", "pill"))
     enable_keyboard_shortcut = bool(getattr(app.config, "spladex_enable_keyboard_shortcut", True))
     enable_live_search = bool(getattr(app.config, "spladex_enable_live_search", True))
+    show_engine_toggle = bool(getattr(app.config, "spladex_show_engine_toggle", False))
+    show_matched_terms = bool(getattr(app.config, "spladex_show_matched_terms", False))
 
     records: list[dict[str, Any]] = []
     if hasattr(app.env, "model_semantic_records"):
@@ -292,6 +295,8 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             "badge_style": badge_style,
             "enable_keyboard_shortcut": enable_keyboard_shortcut,
             "enable_live_search": enable_live_search,
+            "show_engine_toggle": show_engine_toggle,
+            "show_matched_terms": show_matched_terms,
         },
         "query_assets": "model_static_query_assets.json",
         "stats": {
@@ -313,8 +318,16 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         "bm25_index": bm25_index,
     }
 
+    index_format = str(getattr(app.config, "spladex_index_format", "compact")).lower()
+    if index_format == "compact":
+        header = {key: value for key, value in index.items() if key not in ("documents", "inverted_index", "bm25_index")}
+        index = build_compact_index(documents, inverted_index, bm25_index, header)
+        query_assets = compact_query_assets(query_assets)
+    elif index_format != "legacy":
+        logger.warning("Unknown spladex_index_format '%s'. Using 'legacy'.", index_format)
+
     index_path = out_static / "model_semantic_index.json"
-    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    index_path.write_text(json.dumps(index, separators=(",", ":")), encoding="utf-8")
     (out_static / "model_static_query_assets.json").write_text(
         json.dumps(query_assets, separators=(",", ":")), encoding="utf-8"
     )
@@ -332,6 +345,7 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_semantic_weight", 0.6, "html")
     app.add_config_value("spladex_bm25_weight", 0.4, "html")
     app.add_config_value("spladex_rrf_k", 60, "html")
+    app.add_config_value("spladex_index_format", "compact", "html")
 
     # UI Theme & Customization Configs
     app.add_config_value("spladex_results_per_page", 10, "html")
@@ -340,6 +354,8 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_badge_style", "pill", "html")
     app.add_config_value("spladex_enable_keyboard_shortcut", True, "html")
     app.add_config_value("spladex_enable_live_search", True, "html")
+    app.add_config_value("spladex_show_engine_toggle", False, "html")
+    app.add_config_value("spladex_show_matched_terms", False, "html")
 
     # Backwards compatibility configs
     app.add_config_value("semantic_search_model_name", "Arvind0101/static-query-splade-code-docs", "html")

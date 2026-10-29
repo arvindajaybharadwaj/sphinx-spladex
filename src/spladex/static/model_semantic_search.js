@@ -41,6 +41,82 @@
     return cleanText.slice(0, 320) + "...";
   }
 
+  // Compact index ("spladex-compact"): posting lists are [deltaDocIds, values] and are
+  // decoded on first use. Legacy indexes store [[docId, value], ...] directly.
+  function lazyPostings(encoded, docIds, scale) {
+    const decoded = Object.create(null);
+    return {
+      __lazy: true,
+      keys: () => Object.keys(encoded),
+      get(term) {
+        if (term in decoded) return decoded[term];
+        const entry = encoded[term];
+        if (!entry) return [];
+        const [deltas, values] = entry;
+        const pairs = new Array(deltas.length);
+        let docIndex = 0;
+        for (let i = 0; i < deltas.length; i++) {
+          docIndex += deltas[i];
+          pairs[i] = [docIds[docIndex], scale ? values[i] * scale : values[i]];
+        }
+        decoded[term] = pairs;
+        return pairs;
+      },
+    };
+  }
+
+  function getPostings(store, term) {
+    if (!store) return [];
+    if (store.__lazy) return store.get(term);
+    return Object.prototype.hasOwnProperty.call(store, term) ? store[term] : [];
+  }
+
+  function getTerms(store) {
+    if (!store) return [];
+    return store.__lazy ? store.keys() : Object.keys(store);
+  }
+
+  function normaliseIndex(index) {
+    if (index.kind !== "spladex-compact") return index;
+    const docs = index.docs;
+    const ids = docs.id;
+    const documents = {};
+    const lengths = {};
+    for (let i = 0; i < ids.length; i++) {
+      documents[ids[i]] = {
+        title: docs.title[i],
+        url: docs.url[i],
+        text: docs.text[i],
+        granularity: docs.granularity[i],
+        object_type: docs.object_type[i],
+      };
+      lengths[ids[i]] = index.bm25.document_lengths[i];
+    }
+    index.documents = documents;
+    index.inverted_index = lazyPostings(index.splade.postings, ids, index.splade.scale);
+    index.bm25_index = {
+      k1: index.bm25.k1,
+      b: index.bm25.b,
+      num_documents: index.bm25.num_documents,
+      avg_document_length: index.bm25.avg_document_length,
+      document_lengths: lengths,
+      postings: lazyPostings(index.bm25.postings, ids, null),
+    };
+    return index;
+  }
+
+  function normaliseQueryAssets(assets) {
+    const tokenizer = (assets && assets.tokenizer) || {};
+    if (!tokenizer.vocab && Array.isArray(tokenizer.vocab_list)) {
+      const vocab = Object.create(null);
+      tokenizer.vocab_list.forEach((token, tokenId) => {
+        if (token) vocab[token] = tokenId;
+      });
+      tokenizer.vocab = vocab;
+    }
+    return assets;
+  }
+
   function loadIndex() {
     if (indexPromise) {
       return indexPromise;
@@ -62,7 +138,7 @@
         }
         return response.json();
       })
-      .then((index) => index);
+      .then(normaliseIndex);
 
     return indexPromise;
   }
@@ -81,7 +157,7 @@
     queryAssetsPromise = fetch(assetUrl).then((response) => {
       if (!response.ok) throw new Error("Failed to load static query weights");
       return response.json();
-    });
+    }).then(normaliseQueryAssets);
     return queryAssetsPromise;
   }
 
@@ -118,7 +194,9 @@
     return tokens;
   }
 
-  function searchLocalIndex(index, queryAssets, query, topK = 100) {
+  // mode: "hybrid" (shipped RRF + title boost), "semantic" (SPLADE channel alone) or
+  // "lexical" (BM25 channel alone). Each result carries the query terms it matched.
+  function searchLocalIndex(index, queryAssets, query, topK = 100, mode = "hybrid") {
     const terms = query
       .toLowerCase()
       .replace(/[^\w\s_]/g, " ")
@@ -127,6 +205,11 @@
 
     const semanticScores = {};
     const bm25Scores = {};
+    const semanticMatched = {};
+    const bm25Matched = {};
+    const addMatch = (store, docId, term) => {
+      (store[docId] = store[docId] || new Set()).add(term);
+    };
     const invertedIndex = index.inverted_index || {};
     const vocab = queryAssets.tokenizer.vocab || {};
     const weights = queryAssets.weights || [];
@@ -137,10 +220,11 @@
       if (tokenId === undefined || specialIds.has(tokenId)) continue;
       const queryWeight = weights[tokenId] || 0;
       if (queryWeight <= 0) continue;
-      const postings = invertedIndex[term] || [];
+      const postings = getPostings(invertedIndex, term);
       for (const [docId, documentWeight] of postings) {
         semanticScores[docId] =
           (semanticScores[docId] || 0.0) + queryWeight * documentWeight;
+        addMatch(semanticMatched, docId, term.replace(/^##/, ""));
       }
     }
 
@@ -161,7 +245,7 @@
     const b = bm25.b || 0.75;
 
     // Collect all candidate index terms matching either exact term or subword stem
-    const allIndexTerms = Object.keys(postingsByTerm);
+    const allIndexTerms = getTerms(postingsByTerm);
 
     for (let i = 0; i < terms.length; i++) {
       const term = terms[i];
@@ -175,7 +259,7 @@
       });
 
       for (const matchedTerm of matchingIndexTerms) {
-        const postings = postingsByTerm[matchedTerm] || [];
+        const postings = getPostings(postingsByTerm, matchedTerm);
         if (!postings.length) continue;
 
         // Discount partial stem matches slightly (0.75x) vs exact term matches (1.0x)
@@ -192,6 +276,7 @@
           bm25Scores[docId] =
             (bm25Scores[docId] || 0) +
             matchWeight * ((idf * (frequency * (k1 + 1))) / denominator);
+          addMatch(bm25Matched, docId, term);
         }
       }
     }
@@ -200,7 +285,7 @@
     const semanticWeight = hybrid.semantic_weight ?? 0.6;
     const bm25Weight = hybrid.bm25_weight ?? 0.4;
     const rrfK = hybrid.rrf_k ?? 60;
-    const scores = {};
+    let scores = {};
     const addRrfScores = (channelScores, channelWeight) => {
       const ranked = Object.entries(channelScores).sort((a, b) => b[1] - a[1]);
       ranked.forEach(([docId], position) => {
@@ -208,11 +293,17 @@
         scores[docId] = (scores[docId] || 0) + channelWeight / (rrfK + rank);
       });
     };
-    addRrfScores(semanticScores, semanticWeight);
-    addRrfScores(bm25Scores, bm25Weight);
+    if (mode === "semantic") {
+      scores = semanticScores;
+    } else if (mode === "lexical") {
+      scores = bm25Scores;
+    } else {
+      addRrfScores(semanticScores, semanticWeight);
+      addRrfScores(bm25Scores, bm25Weight);
+    }
 
     // Universal exact symbol title boost: if query contains exact symbol name (e.g. 'reshape'), boost primary function
-    for (const [docId, doc] of Object.entries(index.documents)) {
+    for (const [docId, doc] of mode === "hybrid" ? Object.entries(index.documents) : []) {
       if (scores[docId] && doc) {
         const titleLower = (doc.title || "").toLowerCase();
         const parts = titleLower.split(".");
@@ -234,7 +325,15 @@
     const sortedDocs = Object.entries(scores)
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, 50) // Cap at top 50 candidate documents
-      .map(([docId]) => index.documents[docId])
+      .map(([docId]) => {
+        const doc = index.documents[docId];
+        if (!doc) return null;
+        const matched = new Set([
+          ...(mode !== "lexical" ? semanticMatched[docId] || [] : []),
+          ...(mode !== "semantic" ? bm25Matched[docId] || [] : []),
+        ]);
+        return Object.assign({}, doc, { matched: Array.from(matched) });
+      })
       .filter(Boolean);
 
     // Universal Deduplication across any Sphinx documentation site
@@ -330,6 +429,11 @@
       .spladex-pagination a {
         color: var(--spladex-accent);
       }
+      .spladex-matched {
+        font-size: 0.8em;
+        opacity: 0.7;
+        margin-top: 2px;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -367,6 +471,48 @@
 
   let currentPage = 1;
 
+  const ENGINE_MODES = [
+    { id: "hybrid", label: "Hybrid (SpladeX + BM25)" },
+    { id: "semantic", label: "SpladeX only" },
+    { id: "lexical", label: "BM25 only" },
+  ];
+  let currentMode = "hybrid";
+  try {
+    currentMode = window.localStorage.getItem("spladex_engine_mode") || "hybrid";
+  } catch (e) {
+    currentMode = "hybrid";
+  }
+
+  // Optional engine switch (spladex_show_engine_toggle) for demonstrations and comparisons.
+  function renderEngineToggle(container) {
+    if (!currentUiConfig.show_engine_toggle) return;
+    const bar = document.createElement("div");
+    bar.className = "spladex-engine-toggle";
+    bar.style.cssText = "display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 16px 0;";
+    bar.innerHTML = '<span style="opacity:0.7; font-size:0.85em;">Engine:</span>';
+    for (const mode of ENGINE_MODES) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = mode.label;
+      const active = mode.id === currentMode;
+      button.style.cssText =
+        "padding:4px 12px; border-radius:999px; cursor:pointer; font-size:0.85em; border:1px solid var(--spladex-accent);" +
+        (active ? "background:var(--spladex-accent); color:#fff;" : "background:transparent; color:inherit;");
+      button.addEventListener("click", () => {
+        if (mode.id === currentMode) return;
+        currentMode = mode.id;
+        try {
+          window.localStorage.setItem("spladex_engine_mode", mode.id);
+        } catch (e) {
+          /* storage unavailable: keep the choice for this page only */
+        }
+        runSearch().catch(console.error);
+      });
+      bar.appendChild(button);
+    }
+    container.appendChild(bar);
+  }
+
   function renderResults(query, results, page = 1) {
     currentPage = page;
     const container = findResultsContainer();
@@ -376,6 +522,7 @@
       <h1>Search</h1>
       <p>Search results for <code>${escapeHtml(query)}</code></p>
     `;
+    renderEngineToggle(container);
 
     if (!query.trim()) {
       container.innerHTML += "<p>Type a query in the search box.</p>";
@@ -400,9 +547,14 @@
         ? `<span class="spladex-badge">${escapeHtml(result.object_type)}</span>`
         : "";
 
+      const matchedHtml =
+        currentUiConfig.show_matched_terms && result.matched && result.matched.length
+          ? `<div class="spladex-matched">matched: ${escapeHtml(result.matched.join(", "))}</div>`
+          : "";
       item.innerHTML = `
         <a href="${escapeHtml(result.url)}">${escapeHtml(result.title)}</a>${badgeHtml}
         <div class="context">${escapeHtml(makeSnippet(result.text || ""))}</div>
+        ${matchedHtml}
       `;
 
       list.appendChild(item);
@@ -480,12 +632,18 @@
       initKeyboardShortcuts(currentUiConfig);
 
       const queryAssets = await loadQueryAssets(index);
-      const results = searchLocalIndex(index, queryAssets, query, 100);
+      const results = searchLocalIndex(index, queryAssets, query, 100, currentMode);
       renderResults(query, results, 1);
     } catch (error) {
       renderError(query, error);
     }
   }
+
+  // Allow the ranking code to be exercised from Node (tests and offline evaluation).
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { normaliseIndex, normaliseQueryAssets, searchLocalIndex, wordPieceTokens };
+  }
+  if (typeof document === "undefined") return;
 
   document.addEventListener("DOMContentLoaded", function () {
     const path = window.location.pathname;

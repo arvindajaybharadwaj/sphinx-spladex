@@ -65,23 +65,41 @@ class SemanticSparseEncoder:
 
     @torch.no_grad()
     def encode(self, text: str) -> dict[str, float]:
-        if not text or not text.strip():
-            return {}
+        return self.encode_batch([text])[0]
 
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=self.max_length,
-        ).to(self.device)
+    @torch.no_grad()
+    def encode_batch(self, texts: list[str], batch_size: int = 16) -> list[dict[str, float]]:
+        """Encode many records; batches group texts of similar token length to limit padding.
 
-        outputs = self.model(**inputs)
-        attention_mask = inputs["attention_mask"].unsqueeze(-1)
-        # SPLADE log-ReLU max pooling
-        weights = torch.log1p(torch.relu(outputs.logits)) * attention_mask
-        scores = torch.max(weights, dim=1).values.squeeze(0)
+        Padding positions are masked before max pooling, so each vector equals the one
+        ``encode`` produces for that text alone (up to floating-point noise).
+        """
+        results: list[dict[str, float]] = [{} for _ in texts]
+        todo = [i for i, text in enumerate(texts) if text and text.strip()]
+        lengths = {
+            i: len(self.tokenizer(texts[i], truncation=True, max_length=self.max_length)["input_ids"])
+            for i in todo
+        }
+        todo.sort(key=lambda i: lengths[i])
+        for start in range(0, len(todo), max(1, batch_size)):
+            chunk = todo[start : start + batch_size]
+            inputs = self.tokenizer(
+                [texts[i] for i in chunk],
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+            ).to(self.device)
+            outputs = self.model(**inputs)
+            attention_mask = inputs["attention_mask"].unsqueeze(-1)
+            # SPLADE log-ReLU max pooling
+            weights = torch.log1p(torch.relu(outputs.logits)) * attention_mask
+            scores = torch.max(weights, dim=1).values
+            for row, i in enumerate(chunk):
+                results[i] = self._top_terms(scores[row])
+        return results
 
+    def _top_terms(self, scores: torch.Tensor) -> dict[str, float]:
         k = min(self.top_k, scores.shape[0])
         values, indices = torch.topk(scores, k=k)
 

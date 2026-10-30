@@ -118,7 +118,8 @@
       const whole = word.replace(/^\.+|\.+$/g, "").toLowerCase();
       if (!whole) continue;
       tokens.push(whole);
-      const parts = word.split(/[._]|(?<=[a-z])(?=[A-Z])/).filter(Boolean);
+      // camelCase boundary without a lookbehind, which older Safari versions cannot parse
+      const parts = word.replace(/([a-z])([A-Z])/g, "$1\u0000$2").split(/[._\u0000]/).filter(Boolean);
       if (parts.length > 1) tokens.push(...parts.map((p) => p.toLowerCase()));
     }
     return tokens;
@@ -759,7 +760,7 @@
 
   // Allow the ranking code to be exercised from Node (tests and offline evaluation).
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { normaliseIndex, normaliseQueryAssets, searchLocalIndex, wordPieceTokens };
+    module.exports = { identifierTokens, normaliseIndex, normaliseQueryAssets, searchLocalIndex, wordPieceTokens };
   }
   if (typeof document === "undefined") return;
 

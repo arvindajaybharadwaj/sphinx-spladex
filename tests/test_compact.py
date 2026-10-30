@@ -94,3 +94,15 @@ console.log(JSON.stringify(out));
     for key, (legacy_urls, compact_urls) in pairs.items():
         assert legacy_urls == compact_urls, key
     assert pairs["semantic:test if a number is finite"][0][0] == "api.html#pkg.isfinite"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required for the tokenizer parity test")
+def test_browser_identifier_tokens_match_python():
+    from spladex.encoder import tokenize_for_bm25
+
+    samples = ["DataFrame.dropna", "nan_to_num()", "getHTTPResponse", "aBcD x.y_z", "numpy.linalg.norm",
+               "replace NaN values", "...leading.dots...", "camelCaseWord and snake_case_word"]
+    script = (f"const sx = require({json.dumps(str(JS))});"
+              f"console.log(JSON.stringify({json.dumps(samples)}.map((s) => sx.identifierTokens(s))));")
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == [tokenize_for_bm25(s, mode="identifier") for s in samples]

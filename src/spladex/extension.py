@@ -173,7 +173,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         "semantic_search_model_name",
         os.environ.get(
             "SEMANTIC_SEARCH_MODEL",
-            "Arvind0101/static-query-splade-code-docs",
+            "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill",
         ),
     )
     device = getattr(app.config, "spladex_device", None) or getattr(
@@ -355,7 +355,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
 
 def setup(app: Any) -> dict[str, Any]:
     # Modern Configs
-    app.add_config_value("spladex_model_name", "Arvind0101/static-query-splade-code-docs", "html")
+    app.add_config_value("spladex_model_name", "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill", "html")
     app.add_config_value("spladex_device", "cpu", "html")
     app.add_config_value("spladex_max_length", 256, "html")
     app.add_config_value("spladex_top_k_terms", 96, "html")
@@ -381,7 +381,7 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_show_matched_terms", False, "html")
 
     # Backwards compatibility configs
-    app.add_config_value("semantic_search_model_name", "Arvind0101/static-query-splade-code-docs", "html")
+    app.add_config_value("semantic_search_model_name", "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill", "html")
     app.add_config_value("semantic_search_device", "cpu", "html")
     app.add_config_value("semantic_search_max_length", 256, "html")
     app.add_config_value("semantic_search_top_k_terms", 96, "html")
@@ -395,7 +395,7 @@ def setup(app: Any) -> dict[str, Any]:
     app.connect("build-finished", on_build_finished)
 
     return {
-        "version": "0.1.0",
+        "version": "0.2.0",
         "parallel_read_safe": True,
         "parallel_write_safe": True,
     }

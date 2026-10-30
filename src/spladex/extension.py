@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +253,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         logger.warning("[SpladeX] Neural SPLADE encoder initialization failed (%s). Indexing will fall back to BM25-only search.", err)
 
     documents: list[dict[str, Any]] = []
+    encode_started = time.perf_counter()
 
     with progress_message(f"[SpladeX] Encoding {len(records)} documentation records for search"):
         for record in records:
@@ -276,6 +278,9 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
                     "vector": vector,
                 }
             )
+
+    encode_seconds = time.perf_counter() - encode_started
+    logger.info("[SpladeX] Encoded %d records in %.1f s with %s", len(documents), encode_seconds, model_name)
 
     inverted_index = build_inverted_index(documents)
     bm25_index = build_bm25_index(documents, tokenizer=bm25_tokenizer)
@@ -319,6 +324,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         },
         "query_assets": "model_static_query_assets.json",
         "stats": {
+            "encode_seconds": round(encode_seconds, 1),
             "num_documents": len(documents),
             "num_terms": len(inverted_index),
             "num_bm25_terms": len(bm25_index["postings"]),

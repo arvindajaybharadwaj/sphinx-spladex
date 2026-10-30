@@ -255,17 +255,22 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     documents: list[dict[str, Any]] = []
     encode_started = time.perf_counter()
 
+    batch_size = int(getattr(app.config, "spladex_batch_size", 16) or 16)
+    texts = [" ".join([record["title"], record["object_type"], record["text"]]) for record in records]
+    vectors: list[dict[str, float]] = [{} for _ in records]
     with progress_message(f"[SpladeX] Encoding {len(records)} documentation records for search"):
-        for record in records:
-            searchable_text = " ".join([record["title"], record["object_type"], record["text"]])
-            vector: dict[str, float] = {}
+        if encoder is not None:
+            try:
+                vectors = encoder.encode_batch(texts, batch_size=batch_size)
+            except Exception as err:
+                logger.warning("[SpladeX] Batched encoding failed (%s); encoding records one by one.", err)
+                for position, (record, text) in enumerate(zip(records, texts)):
+                    try:
+                        vectors[position] = encoder.encode(text)
+                    except Exception as record_err:
+                        logger.warning("[SpladeX] Encoding failed for record '%s': %s", record.get("id"), record_err)
 
-            if encoder is not None:
-                try:
-                    vector = encoder.encode(searchable_text)
-                except Exception as err:
-                    logger.warning("[SpladeX] Encoding failed for record '%s': %s", record.get("id"), err)
-
+        for record, searchable_text, vector in zip(records, texts, vectors):
             documents.append(
                 {
                     "id": record["id"],
@@ -376,6 +381,7 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_bm25_weight", 0.4, "html")
     app.add_config_value("spladex_rrf_k", 60, "html")
     app.add_config_value("spladex_index_format", "compact", "html")
+    app.add_config_value("spladex_batch_size", 16, "html")
     app.add_config_value("spladex_bm25_tokenizer", "identifier", "html")
     app.add_config_value("spladex_title_boost", "off", "html")
     app.add_config_value("spladex_bm25_prefix_match", False, "html")

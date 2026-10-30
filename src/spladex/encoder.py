@@ -129,6 +129,27 @@ def build_inverted_index(documents: list[dict[str, Any]]) -> dict[str, list[list
     return inverted
 
 
+def _load_idf_json_weights(model_name: str, tokenizer: Any) -> list[float] | None:
+    """Return per-token weights from an ``idf.json`` (token -> idf) if the model ships one."""
+    local = Path(model_name) / "idf.json"
+    try:
+        path = local if local.exists() else Path(hf_hub_download(repo_id=model_name, filename="idf.json"))
+    except Exception:
+        return None
+    import json
+
+    idf = json.loads(path.read_text(encoding="utf-8"))
+    weights = [0.0] * tokenizer.vocab_size
+    for token, value in idf.items():
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id is not None and 0 <= token_id < len(weights):
+            weights[token_id] = round(float(value), 6)
+    for special_id in tokenizer.all_special_ids:
+        if 0 <= special_id < len(weights):
+            weights[special_id] = 0.0
+    return weights
+
+
 def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]:
     """Load static query weights and the matching tokenizer vocabulary.
 
@@ -138,6 +159,22 @@ def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]
     """
     vocab = tokenizer.get_vocab()
     vocab_size = tokenizer.vocab_size
+
+    idf_weights = _load_idf_json_weights(model_name, tokenizer)
+    if idf_weights is not None:
+        # OpenSearch inference-free models: query weight = IDF of the token (idf.json).
+        return {
+            "version": "1",
+            "kind": "learned-static-query-weights",
+            "tokenizer": {
+                "type": "wordpiece",
+                "do_lower_case": bool(getattr(tokenizer, "do_lower_case", True)),
+                "vocab": vocab,
+                "unknown_token": getattr(tokenizer, "unk_token", "[UNK]"),
+            },
+            "weights": idf_weights,
+            "special_token_ids": list(tokenizer.all_special_ids),
+        }
 
     try:
         weight_path = hf_hub_download(repo_id=model_name, filename="static_query_weights.pt")

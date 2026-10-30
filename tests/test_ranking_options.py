@@ -52,3 +52,22 @@ def test_new_builds_record_ranking_defaults(tmp_path: Path):
     assert index["hybrid"]["bm25_prefix_match"] is False
     assert index["hybrid"]["dedupe"] == "exact"
     assert index["bm25"]["tokenizer"] == "identifier"
+
+
+def test_build_writes_small_ui_config(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from spladex.extension import on_build_finished
+
+    app = SimpleNamespace(
+        builder=SimpleNamespace(name="html"), outdir=str(tmp_path),
+        config=SimpleNamespace(spladex_model_name="does-not-exist/model", spladex_enable_keyboard_shortcut=False),
+        env=SimpleNamespace(model_semantic_records={"index": [{
+            "id": "page:index", "title": "Index", "url": "index.html", "text": "text",
+            "granularity": "page", "object_type": "page"}]}),
+    )
+    on_build_finished(app, None)
+    config_path = tmp_path / "_static" / "model_semantic_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["ui_config"]["enable_keyboard_shortcut"] is False
+    assert config_path.stat().st_size < 1000

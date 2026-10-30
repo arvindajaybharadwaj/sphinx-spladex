@@ -7,12 +7,19 @@
     return params.get("q") || "";
   }
 
+  // Themes often have several search boxes (e.g. a hidden pop-up plus the one on search.html).
+  function findSearchInputs() {
+    const inputs = document.querySelectorAll("input[name='q'], input[type='search'], #searchbox input");
+    return Array.from(new Set(inputs));
+  }
+
+  function isVisible(element) {
+    return !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  }
+
   function findSearchInput() {
-    return (
-      document.querySelector("input[name='q']") ||
-      document.querySelector("input[type='search']") ||
-      document.querySelector("#searchbox input")
-    );
+    const inputs = findSearchInputs();
+    return inputs.find(isVisible) || inputs[0] || null;
   }
 
   function findResultsContainer() {
@@ -673,11 +680,57 @@
     }
   }
 
-  async function runSearch() {
-    const query = getQueryFromUrl();
+  function staticUrl(name) {
+    const urlRoot =
+      (typeof DOCUMENTATION_OPTIONS !== "undefined" && DOCUMENTATION_OPTIONS.URL_ROOT) || "";
+    return new URL(urlRoot + "_static/" + name, window.location.href).toString();
+  }
+
+  // Non-search pages only need the UI settings, which the build writes to a tiny file, so the
+  // search index is never downloaded outside the search page.
+  function loadUiConfig() {
+    return fetch(staticUrl("model_semantic_config.json"))
+      .then((response) => (response.ok ? response.json() : {}))
+      .then((config) => config.ui_config || {})
+      .catch(() => ({}));
+  }
+
+  // Search-as-you-type on the search page: re-rank with the index already in memory instead of
+  // reloading the page (which would re-fetch and re-parse the index).
+  let liveSearchBound = false;
+  function bindLiveSearch() {
+    if (liveSearchBound || currentUiConfig.enable_live_search === false) return;
+    const inputs = findSearchInputs();
+    if (!inputs.length) return;
+    liveSearchBound = true;
+    let timer = null;
+    const update = (input) => {
+      const query = input.value || "";
+      const url = new URL(window.location.href);
+      url.searchParams.set("q", query);
+      window.history.replaceState(null, "", url.toString());
+      runSearch(query).catch(console.error);
+    };
+    for (const input of inputs) {
+      input.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => update(input), 150);
+      });
+      if (input.form) {
+        input.form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          clearTimeout(timer);
+          update(input);
+        });
+      }
+    }
+  }
+
+  async function runSearch(queryOverride) {
+    const query = typeof queryOverride === "string" ? queryOverride : getQueryFromUrl();
 
     const input = findSearchInput();
-    if (input) {
+    if (input && typeof queryOverride !== "string") {
       input.value = query;
     }
 
@@ -686,7 +739,7 @@
       return;
     }
 
-    renderLoading(query);
+    if (!indexPromise) renderLoading(query);
 
     try {
       const index = await loadIndex();
@@ -694,11 +747,11 @@
         currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
       }
       applyThemeStyles(currentUiConfig);
-      initKeyboardShortcuts(currentUiConfig);
 
       const queryAssets = await loadQueryAssets(index);
       const results = searchLocalIndex(index, queryAssets, query, 100, currentMode);
       renderResults(query, results, 1);
+      bindLiveSearch();
     } catch (error) {
       renderError(query, error);
     }
@@ -713,16 +766,12 @@
   document.addEventListener("DOMContentLoaded", function () {
     const path = window.location.pathname;
 
-    // Load theme styles and keyboard shortcuts across all documentation pages if index is available
-    loadIndex()
-      .then((index) => {
-        if (index && index.ui_config) {
-          currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
-        }
-        applyThemeStyles(currentUiConfig);
-        initKeyboardShortcuts(currentUiConfig);
-      })
-      .catch(() => {});
+    // Theme styles and keyboard shortcuts on every page come from the small config file.
+    loadUiConfig().then((uiConfig) => {
+      currentUiConfig = Object.assign({}, currentUiConfig, uiConfig);
+      applyThemeStyles(currentUiConfig);
+      initKeyboardShortcuts(currentUiConfig);
+    });
 
     // Match both html builder ("…/search.html") and dirhtml builder ("…/search/")
     if (path.endsWith("search.html") || path.endsWith("/search/") || path.endsWith("/search")) {

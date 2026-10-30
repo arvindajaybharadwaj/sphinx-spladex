@@ -356,6 +356,11 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     (out_static / "model_static_query_assets.json").write_text(
         json.dumps(query_assets, separators=(",", ":")), encoding="utf-8"
     )
+    # Small file read on every page (keyboard shortcut, theme), so pages other than search.html
+    # never download the index.
+    (out_static / "model_semantic_config.json").write_text(
+        json.dumps({"ui_config": index.get("ui_config", {})}, separators=(",", ":")), encoding="utf-8"
+    )
     logger.info("[SpladeX] Successfully built semantic index at %s", index_path)
 
 

@@ -65,23 +65,41 @@ class SemanticSparseEncoder:
 
     @torch.no_grad()
     def encode(self, text: str) -> dict[str, float]:
-        if not text or not text.strip():
-            return {}
+        return self.encode_batch([text])[0]
 
-        inputs = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            padding=True,
-            max_length=self.max_length,
-        ).to(self.device)
+    @torch.no_grad()
+    def encode_batch(self, texts: list[str], batch_size: int = 16) -> list[dict[str, float]]:
+        """Encode many records; batches group texts of similar token length to limit padding.
 
-        outputs = self.model(**inputs)
-        attention_mask = inputs["attention_mask"].unsqueeze(-1)
-        # SPLADE log-ReLU max pooling
-        weights = torch.log1p(torch.relu(outputs.logits)) * attention_mask
-        scores = torch.max(weights, dim=1).values.squeeze(0)
+        Padding positions are masked before max pooling, so each vector equals the one
+        ``encode`` produces for that text alone (up to floating-point noise).
+        """
+        results: list[dict[str, float]] = [{} for _ in texts]
+        todo = [i for i, text in enumerate(texts) if text and text.strip()]
+        lengths = {
+            i: len(self.tokenizer(texts[i], truncation=True, max_length=self.max_length)["input_ids"])
+            for i in todo
+        }
+        todo.sort(key=lambda i: lengths[i])
+        for start in range(0, len(todo), max(1, batch_size)):
+            chunk = todo[start : start + batch_size]
+            inputs = self.tokenizer(
+                [texts[i] for i in chunk],
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=self.max_length,
+            ).to(self.device)
+            outputs = self.model(**inputs)
+            attention_mask = inputs["attention_mask"].unsqueeze(-1)
+            # SPLADE log-ReLU max pooling
+            weights = torch.log1p(torch.relu(outputs.logits)) * attention_mask
+            scores = torch.max(weights, dim=1).values
+            for row, i in enumerate(chunk):
+                results[i] = self._top_terms(scores[row])
+        return results
 
+    def _top_terms(self, scores: torch.Tensor) -> dict[str, float]:
         k = min(self.top_k, scores.shape[0])
         values, indices = torch.topk(scores, k=k)
 
@@ -129,6 +147,32 @@ def build_inverted_index(documents: list[dict[str, Any]]) -> dict[str, list[list
     return inverted
 
 
+def _load_idf_json_weights(model_name: str, tokenizer: Any) -> list[float] | None:
+    """Return per-token weights from an ``idf.json`` (token -> idf) if the model ships one."""
+    local = Path(model_name) / "idf.json"
+    try:
+        path = local if local.exists() else Path(hf_hub_download(repo_id=model_name, filename="idf.json"))
+    except Exception:
+        return None
+    import json
+
+    try:
+        idf = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(idf, dict):
+        return None
+    weights = [0.0] * tokenizer.vocab_size
+    for token, value in idf.items():
+        token_id = tokenizer.convert_tokens_to_ids(token)
+        if token_id is not None and 0 <= token_id < len(weights):
+            weights[token_id] = round(float(value), 6)
+    for special_id in tokenizer.all_special_ids:
+        if 0 <= special_id < len(weights):
+            weights[special_id] = 0.0
+    return weights
+
+
 def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]:
     """Load static query weights and the matching tokenizer vocabulary.
 
@@ -138,6 +182,22 @@ def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]
     """
     vocab = tokenizer.get_vocab()
     vocab_size = tokenizer.vocab_size
+
+    idf_weights = _load_idf_json_weights(model_name, tokenizer)
+    if idf_weights is not None:
+        # OpenSearch inference-free models: query weight = IDF of the token (idf.json).
+        return {
+            "version": "1",
+            "kind": "learned-static-query-weights",
+            "tokenizer": {
+                "type": "wordpiece",
+                "do_lower_case": bool(getattr(tokenizer, "do_lower_case", True)),
+                "vocab": vocab,
+                "unknown_token": getattr(tokenizer, "unk_token", "[UNK]"),
+            },
+            "weights": idf_weights,
+            "special_token_ids": list(tokenizer.all_special_ids),
+        }
 
     try:
         weight_path = hf_hub_download(repo_id=model_name, filename="static_query_weights.pt")
@@ -176,14 +236,35 @@ def build_static_query_assets(model_name: str, tokenizer: Any) -> dict[str, Any]
     }
 
 
-def tokenize_for_bm25(text: str) -> list[str]:
-    """Return a small, deterministic tokenizer suitable for a static index."""
+_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_.]+")
+_IDENTIFIER_SPLIT_RE = re.compile(r"[._]|(?<=[a-z])(?=[A-Z])")
+
+
+def tokenize_for_bm25(text: str, mode: str = "simple") -> list[str]:
+    """Return a small, deterministic tokenizer suitable for a static index.
+
+    ``simple`` lowercases and splits on non-word characters (the original behaviour).
+    ``identifier`` also keeps dotted names whole and adds their snake_case, camelCase and
+    dotted parts, so ``DataFrame.dropna`` yields ``dataframe.dropna``, ``data``, ``frame``,
+    ``dropna``. The browser client applies the same rules to queries.
+    """
     if not text:
         return []
-    return re.findall(r"[a-z0-9_]+", text.lower())
+    if mode != "identifier":
+        return re.findall(r"[a-z0-9_]+", text.lower())
+    tokens: list[str] = []
+    for word in _IDENTIFIER_RE.findall(text):
+        whole = word.strip(".").lower()
+        if not whole:
+            continue
+        tokens.append(whole)
+        parts = [part for part in _IDENTIFIER_SPLIT_RE.split(word) if part]
+        if len(parts) > 1:
+            tokens.extend(part.lower() for part in parts)
+    return tokens
 
 
-def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
+def build_bm25_index(documents: list[dict[str, Any]], tokenizer: str = "simple") -> dict[str, Any]:
     """Build a compact BM25 index consumed by the browser search client.
 
     Postings store a document id and term frequency. IDF and final scoring are
@@ -195,7 +276,7 @@ def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
 
     for doc in documents:
         searchable_text = doc.get("searchable_text") or ""
-        tokens = tokenize_for_bm25(searchable_text)
+        tokens = tokenize_for_bm25(searchable_text, tokenizer)
         doc_id = doc["id"]
         document_lengths[doc_id] = len(tokens)
         for term, frequency in Counter(tokens).items():
@@ -206,6 +287,7 @@ def build_bm25_index(documents: list[dict[str, Any]]) -> dict[str, Any]:
         sum(document_lengths.values()) / num_documents if num_documents > 0 else 0.0
     )
     return {
+        "tokenizer": tokenizer,
         "k1": 1.2,
         "b": 0.75,
         "num_documents": num_documents,

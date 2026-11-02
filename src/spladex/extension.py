@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from sphinx import addnodes
 from sphinx.util import logging
 from sphinx.util.display import progress_message
 
+from .compact import build_compact_index, compact_query_assets
 from .encoder import (
     SemanticSparseEncoder,
     build_bm25_index,
@@ -172,7 +174,7 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         "semantic_search_model_name",
         os.environ.get(
             "SEMANTIC_SEARCH_MODEL",
-            "Arvind0101/static-query-splade-code-docs",
+            "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill",
         ),
     )
     device = getattr(app.config, "spladex_device", None) or getattr(
@@ -201,6 +203,22 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         logger.warning("Invalid spladex_rrf_k (%s). Using default 60.", rrf_k)
         rrf_k = 60
 
+    # Ranking heuristics. Defaults were chosen on unseen projects (Flutter, React); indexes built
+    # before these options existed keep the original client behaviour.
+    bm25_tokenizer = str(getattr(app.config, "spladex_bm25_tokenizer", "identifier"))
+    title_boost = str(getattr(app.config, "spladex_title_boost", "off"))
+    bm25_prefix_match = bool(getattr(app.config, "spladex_bm25_prefix_match", False))
+    dedupe = str(getattr(app.config, "spladex_dedupe", "exact"))
+    if bm25_tokenizer not in ("simple", "identifier"):
+        logger.warning("Invalid spladex_bm25_tokenizer (%s). Using 'identifier'.", bm25_tokenizer)
+        bm25_tokenizer = "identifier"
+    if title_boost not in ("always", "identifier", "off"):
+        logger.warning("Invalid spladex_title_boost (%s). Using 'off'.", title_boost)
+        title_boost = "off"
+    if dedupe not in ("aggressive", "exact"):
+        logger.warning("Invalid spladex_dedupe (%s). Using 'exact'.", dedupe)
+        dedupe = "exact"
+
     # UI Theme & Customization Configs
     results_per_page = int(getattr(app.config, "spladex_results_per_page", 10))
     highlight_color = str(getattr(app.config, "spladex_highlight_color", "#fff3a0"))
@@ -208,6 +226,8 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
     badge_style = str(getattr(app.config, "spladex_badge_style", "pill"))
     enable_keyboard_shortcut = bool(getattr(app.config, "spladex_enable_keyboard_shortcut", True))
     enable_live_search = bool(getattr(app.config, "spladex_enable_live_search", True))
+    show_engine_toggle = bool(getattr(app.config, "spladex_show_engine_toggle", False))
+    show_matched_terms = bool(getattr(app.config, "spladex_show_matched_terms", False))
 
     records: list[dict[str, Any]] = []
     if hasattr(app.env, "model_semantic_records"):
@@ -233,18 +253,24 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         logger.warning("[SpladeX] Neural SPLADE encoder initialization failed (%s). Indexing will fall back to BM25-only search.", err)
 
     documents: list[dict[str, Any]] = []
+    encode_started = time.perf_counter()
 
+    batch_size = int(getattr(app.config, "spladex_batch_size", 16) or 16)
+    texts = [" ".join([record["title"], record["object_type"], record["text"]]) for record in records]
+    vectors: list[dict[str, float]] = [{} for _ in records]
     with progress_message(f"[SpladeX] Encoding {len(records)} documentation records for search"):
-        for record in records:
-            searchable_text = " ".join([record["title"], record["object_type"], record["text"]])
-            vector: dict[str, float] = {}
+        if encoder is not None:
+            try:
+                vectors = encoder.encode_batch(texts, batch_size=batch_size)
+            except Exception as err:
+                logger.warning("[SpladeX] Batched encoding failed (%s); encoding records one by one.", err)
+                for position, (record, text) in enumerate(zip(records, texts)):
+                    try:
+                        vectors[position] = encoder.encode(text)
+                    except Exception as record_err:
+                        logger.warning("[SpladeX] Encoding failed for record '%s': %s", record.get("id"), record_err)
 
-            if encoder is not None:
-                try:
-                    vector = encoder.encode(searchable_text)
-                except Exception as err:
-                    logger.warning("[SpladeX] Encoding failed for record '%s': %s", record.get("id"), err)
-
+        for record, searchable_text, vector in zip(records, texts, vectors):
             documents.append(
                 {
                     "id": record["id"],
@@ -258,8 +284,11 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
                 }
             )
 
+    encode_seconds = time.perf_counter() - encode_started
+    logger.info("[SpladeX] Encoded %d records in %.1f s with %s", len(documents), encode_seconds, model_name)
+
     inverted_index = build_inverted_index(documents)
-    bm25_index = build_bm25_index(documents)
+    bm25_index = build_bm25_index(documents, tokenizer=bm25_tokenizer)
 
     query_assets: dict[str, Any] = {}
     if encoder is not None:
@@ -284,6 +313,9 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             "semantic_weight": semantic_weight,
             "bm25_weight": bm25_weight,
             "rrf_k": rrf_k,
+            "title_boost": title_boost,
+            "bm25_prefix_match": bm25_prefix_match,
+            "dedupe": dedupe,
         },
         "ui_config": {
             "results_per_page": results_per_page,
@@ -292,9 +324,12 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
             "badge_style": badge_style,
             "enable_keyboard_shortcut": enable_keyboard_shortcut,
             "enable_live_search": enable_live_search,
+            "show_engine_toggle": show_engine_toggle,
+            "show_matched_terms": show_matched_terms,
         },
         "query_assets": "model_static_query_assets.json",
         "stats": {
+            "encode_seconds": round(encode_seconds, 1),
             "num_documents": len(documents),
             "num_terms": len(inverted_index),
             "num_bm25_terms": len(bm25_index["postings"]),
@@ -313,17 +348,30 @@ def on_build_finished(app: Any, exception: Exception | None) -> None:
         "bm25_index": bm25_index,
     }
 
+    index_format = str(getattr(app.config, "spladex_index_format", "compact")).lower()
+    if index_format == "compact":
+        header = {key: value for key, value in index.items() if key not in ("documents", "inverted_index", "bm25_index")}
+        index = build_compact_index(documents, inverted_index, bm25_index, header)
+        query_assets = compact_query_assets(query_assets)
+    elif index_format != "legacy":
+        logger.warning("Unknown spladex_index_format '%s'. Using 'legacy'.", index_format)
+
     index_path = out_static / "model_semantic_index.json"
-    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    index_path.write_text(json.dumps(index, separators=(",", ":")), encoding="utf-8")
     (out_static / "model_static_query_assets.json").write_text(
         json.dumps(query_assets, separators=(",", ":")), encoding="utf-8"
+    )
+    # Small file read on every page (keyboard shortcut, theme), so pages other than search.html
+    # never download the index.
+    (out_static / "model_semantic_config.json").write_text(
+        json.dumps({"ui_config": index.get("ui_config", {})}, separators=(",", ":")), encoding="utf-8"
     )
     logger.info("[SpladeX] Successfully built semantic index at %s", index_path)
 
 
 def setup(app: Any) -> dict[str, Any]:
     # Modern Configs
-    app.add_config_value("spladex_model_name", "Arvind0101/static-query-splade-code-docs", "html")
+    app.add_config_value("spladex_model_name", "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill", "html")
     app.add_config_value("spladex_device", "cpu", "html")
     app.add_config_value("spladex_max_length", 256, "html")
     app.add_config_value("spladex_top_k_terms", 96, "html")
@@ -332,6 +380,12 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_semantic_weight", 0.6, "html")
     app.add_config_value("spladex_bm25_weight", 0.4, "html")
     app.add_config_value("spladex_rrf_k", 60, "html")
+    app.add_config_value("spladex_index_format", "compact", "html")
+    app.add_config_value("spladex_batch_size", 16, "html")
+    app.add_config_value("spladex_bm25_tokenizer", "identifier", "html")
+    app.add_config_value("spladex_title_boost", "off", "html")
+    app.add_config_value("spladex_bm25_prefix_match", False, "html")
+    app.add_config_value("spladex_dedupe", "exact", "html")
 
     # UI Theme & Customization Configs
     app.add_config_value("spladex_results_per_page", 10, "html")
@@ -340,9 +394,11 @@ def setup(app: Any) -> dict[str, Any]:
     app.add_config_value("spladex_badge_style", "pill", "html")
     app.add_config_value("spladex_enable_keyboard_shortcut", True, "html")
     app.add_config_value("spladex_enable_live_search", True, "html")
+    app.add_config_value("spladex_show_engine_toggle", False, "html")
+    app.add_config_value("spladex_show_matched_terms", False, "html")
 
     # Backwards compatibility configs
-    app.add_config_value("semantic_search_model_name", "Arvind0101/static-query-splade-code-docs", "html")
+    app.add_config_value("semantic_search_model_name", "opensearch-project/opensearch-neural-sparse-encoding-doc-v3-distill", "html")
     app.add_config_value("semantic_search_device", "cpu", "html")
     app.add_config_value("semantic_search_max_length", 256, "html")
     app.add_config_value("semantic_search_top_k_terms", 96, "html")
@@ -356,7 +412,7 @@ def setup(app: Any) -> dict[str, Any]:
     app.connect("build-finished", on_build_finished)
 
     return {
-        "version": "0.1.0",
+        "version": "0.2.0",
         "parallel_read_safe": True,
         "parallel_write_safe": True,
     }

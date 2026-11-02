@@ -7,12 +7,19 @@
     return params.get("q") || "";
   }
 
+  // Themes often have several search boxes (e.g. a hidden pop-up plus the one on search.html).
+  function findSearchInputs() {
+    const inputs = document.querySelectorAll("input[name='q'], input[type='search'], #searchbox input");
+    return Array.from(new Set(inputs));
+  }
+
+  function isVisible(element) {
+    return !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+  }
+
   function findSearchInput() {
-    return (
-      document.querySelector("input[name='q']") ||
-      document.querySelector("input[type='search']") ||
-      document.querySelector("#searchbox input")
-    );
+    const inputs = findSearchInputs();
+    return inputs.find(isVisible) || inputs[0] || null;
   }
 
   function findResultsContainer() {
@@ -41,6 +48,130 @@
     return cleanText.slice(0, 320) + "...";
   }
 
+  // Compact index ("spladex-compact"): posting lists are [deltaDocIds, values] and are
+  // decoded on first use. Legacy indexes store [[docId, value], ...] directly.
+  function lazyPostings(encoded, docIds, scale) {
+    const decoded = Object.create(null);
+    return {
+      __lazy: true,
+      keys: () => Object.keys(encoded),
+      get(term) {
+        if (term in decoded) return decoded[term];
+        const entry = encoded[term];
+        if (!entry) return [];
+        const [deltas, values] = entry;
+        const pairs = new Array(deltas.length);
+        let docIndex = 0;
+        for (let i = 0; i < deltas.length; i++) {
+          docIndex += deltas[i];
+          pairs[i] = [docIds[docIndex], scale ? values[i] * scale : values[i]];
+        }
+        decoded[term] = pairs;
+        return pairs;
+      },
+    };
+  }
+
+  function getPostings(store, term) {
+    if (!store) return [];
+    if (store.__lazy) return store.get(term);
+    return Object.prototype.hasOwnProperty.call(store, term) ? store[term] : [];
+  }
+
+  // Sorted term list per posting store, built once, so prefix matches use binary search
+  // instead of scanning the whole vocabulary for every query word.
+  const sortedTermCache = new WeakMap();
+
+  function getSortedTerms(store) {
+    if (!store) return [];
+    let terms = sortedTermCache.get(store);
+    if (!terms) {
+      terms = (store.__lazy ? store.keys() : Object.keys(store)).slice().sort();
+      sortedTermCache.set(store, terms);
+    }
+    return terms;
+  }
+
+  // Terms equal to `term`, plus terms starting with `stem` when the stem has 4+ characters.
+  function matchIndexTerms(store, term, stem) {
+    const terms = getSortedTerms(store);
+    const matches = [];
+    const hasExact = store.__lazy ? store.get(term).length > 0 : Object.prototype.hasOwnProperty.call(store, term);
+    if (stem.length >= 4) {
+      let lo = 0;
+      let hi = terms.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (terms[mid] < stem) lo = mid + 1;
+        else hi = mid;
+      }
+      for (let i = lo; i < terms.length && terms[i].startsWith(stem); i++) matches.push(terms[i]);
+    }
+    if (hasExact && !matches.includes(term)) matches.push(term);
+    return matches;
+  }
+
+  // Mirrors spladex.encoder.tokenize_for_bm25(mode="identifier").
+  function identifierTokens(text) {
+    const tokens = [];
+    for (const word of text.match(/[A-Za-z0-9_.]+/g) || []) {
+      const whole = word.replace(/^\.+|\.+$/g, "").toLowerCase();
+      if (!whole) continue;
+      tokens.push(whole);
+      // camelCase boundary without a lookbehind, which older Safari versions cannot parse
+      const parts = word.replace(/([a-z])([A-Z])/g, "$1\u0000$2").split(/[._\u0000]/).filter(Boolean);
+      if (parts.length > 1) tokens.push(...parts.map((p) => p.toLowerCase()));
+    }
+    return tokens;
+  }
+
+  function looksLikeIdentifier(query) {
+    const trimmed = query.trim();
+    return /[._()]|[a-z][A-Z]/.test(trimmed) || trimmed.split(/\s+/).length <= 2;
+  }
+
+  function normaliseIndex(index) {
+    if (index.kind !== "spladex-compact") return index;
+    const docs = index.docs;
+    const ids = docs.id;
+    const documents = {};
+    const lengths = {};
+    for (let i = 0; i < ids.length; i++) {
+      documents[ids[i]] = {
+        title: docs.title[i],
+        url: docs.url[i],
+        text: docs.text[i],
+        granularity: docs.granularity[i],
+        object_type: docs.object_type[i],
+      };
+      lengths[ids[i]] = index.bm25.document_lengths[i];
+    }
+    index.documents = documents;
+    index.inverted_index = lazyPostings(index.splade.postings, ids, index.splade.scale);
+    index.bm25_index = {
+      tokenizer: index.bm25.tokenizer,
+      k1: index.bm25.k1,
+      b: index.bm25.b,
+      num_documents: index.bm25.num_documents,
+      avg_document_length: index.bm25.avg_document_length,
+      document_lengths: lengths,
+      postings: lazyPostings(index.bm25.postings, ids, null),
+    };
+    return index;
+  }
+
+  function normaliseQueryAssets(assets) {
+    const tokenizer = (assets && assets.tokenizer) || {};
+    if (!tokenizer.vocab && Array.isArray(tokenizer.vocab_list)) {
+      const vocab = Object.create(null);
+      tokenizer.vocab_list.forEach((token, tokenId) => {
+        if (token) vocab[token] = tokenId;
+      });
+      tokenizer.vocab = vocab;
+    }
+    return assets;
+  }
+
   function loadIndex() {
     if (indexPromise) {
       return indexPromise;
@@ -62,7 +193,7 @@
         }
         return response.json();
       })
-      .then((index) => index);
+      .then(normaliseIndex);
 
     return indexPromise;
   }
@@ -81,7 +212,7 @@
     queryAssetsPromise = fetch(assetUrl).then((response) => {
       if (!response.ok) throw new Error("Failed to load static query weights");
       return response.json();
-    });
+    }).then(normaliseQueryAssets);
     return queryAssetsPromise;
   }
 
@@ -118,15 +249,35 @@
     return tokens;
   }
 
-  function searchLocalIndex(index, queryAssets, query, topK = 100) {
+  // mode: "hybrid" (shipped RRF + title boost), "semantic" (SPLADE channel alone) or
+  // "lexical" (BM25 channel alone). Each result carries the query terms it matched.
+  function searchLocalIndex(index, queryAssets, query, topK = 100, mode = "hybrid") {
     const terms = query
       .toLowerCase()
       .replace(/[^\w\s_]/g, " ")
       .split(/\s+/)
       .filter((t) => t.length > 0);
 
-    const semanticScores = {};
-    const bm25Scores = {};
+    // Scores are Maps (insertion-ordered, like the original objects). Matched terms are kept
+    // as a bitmask of query-term positions per document and decoded only for returned results.
+    const semanticScores = new Map();
+    const bm25Scores = new Map();
+    const semanticMatched = new Map();
+    const bm25Matched = new Map();
+    const semanticTermList = [];
+    const bm25TermList = [];
+    const markMatch = (store, termList, docId, term) => {
+      let bit = termList.indexOf(term);
+      if (bit === -1) {
+        bit = termList.length;
+        termList.push(term);
+      }
+      if (bit < 31) store.set(docId, (store.get(docId) || 0) | (1 << bit));
+    };
+    const decodeMatches = (store, termList, docId) => {
+      const mask = store.get(docId) || 0;
+      return termList.filter((_, bit) => bit < 31 && mask & (1 << bit));
+    };
     const invertedIndex = index.inverted_index || {};
     const vocab = queryAssets.tokenizer.vocab || {};
     const weights = queryAssets.weights || [];
@@ -137,10 +288,11 @@
       if (tokenId === undefined || specialIds.has(tokenId)) continue;
       const queryWeight = weights[tokenId] || 0;
       if (queryWeight <= 0) continue;
-      const postings = invertedIndex[term] || [];
+      const postings = getPostings(invertedIndex, term);
+      const shown = term.replace(/^##/, "");
       for (const [docId, documentWeight] of postings) {
-        semanticScores[docId] =
-          (semanticScores[docId] || 0.0) + queryWeight * documentWeight;
+        semanticScores.set(docId, (semanticScores.get(docId) || 0.0) + queryWeight * documentWeight);
+        markMatch(semanticMatched, semanticTermList, docId, shown);
       }
     }
 
@@ -150,8 +302,6 @@
       return w.replace(/(ing|ed|es|s|tion|able|ive)$/, "");
     }
 
-    const termStems = terms.map((t) => getStem(t)).filter((s) => s.length >= 3);
-
     const bm25 = index.bm25_index || {};
     const postingsByTerm = bm25.postings || {};
     const documentLengths = bm25.document_lengths || {};
@@ -159,23 +309,20 @@
     const averageLength = bm25.avg_document_length || 1;
     const k1 = bm25.k1 || 1.2;
     const b = bm25.b || 0.75;
+    // Indexes built with the identifier tokenizer get the same tokenisation for queries;
+    // bm25_prefix_match (default on, the original behaviour) also matches terms sharing a stem.
+    const bm25Terms = bm25.tokenizer === "identifier" ? Array.from(new Set(identifierTokens(query))) : terms;
+    const prefixMatch = (index.hybrid && index.hybrid.bm25_prefix_match) ?? true;
 
-    // Collect all candidate index terms matching either exact term or subword stem
-    const allIndexTerms = Object.keys(postingsByTerm);
-
-    for (let i = 0; i < terms.length; i++) {
-      const term = terms[i];
-      const stem = termStems[i] || term;
+    for (let i = 0; i < bm25Terms.length; i++) {
+      const term = bm25Terms[i];
+      const stem = prefixMatch ? getStem(term) : "";
 
       // Find all index terms that match exact term or share the subword stem
-      const matchingIndexTerms = allIndexTerms.filter((idxTerm) => {
-        if (idxTerm === term) return true;
-        if (stem.length >= 4 && idxTerm.startsWith(stem)) return true;
-        return false;
-      });
+      const matchingIndexTerms = matchIndexTerms(postingsByTerm, term, stem);
 
       for (const matchedTerm of matchingIndexTerms) {
-        const postings = postingsByTerm[matchedTerm] || [];
+        const postings = getPostings(postingsByTerm, matchedTerm);
         if (!postings.length) continue;
 
         // Discount partial stem matches slightly (0.75x) vs exact term matches (1.0x)
@@ -189,9 +336,11 @@
           const length = documentLengths[docId] || 0;
           const denominator =
             frequency + k1 * (1 - b + (b * length) / averageLength);
-          bm25Scores[docId] =
-            (bm25Scores[docId] || 0) +
-            matchWeight * ((idf * (frequency * (k1 + 1))) / denominator);
+          bm25Scores.set(
+            docId,
+            (bm25Scores.get(docId) || 0) + matchWeight * ((idf * (frequency * (k1 + 1))) / denominator),
+          );
+          markMatch(bm25Matched, bm25TermList, docId, term);
         }
       }
     }
@@ -200,41 +349,62 @@
     const semanticWeight = hybrid.semantic_weight ?? 0.6;
     const bm25Weight = hybrid.bm25_weight ?? 0.4;
     const rrfK = hybrid.rrf_k ?? 60;
-    const scores = {};
+    let scores = new Map();
     const addRrfScores = (channelScores, channelWeight) => {
-      const ranked = Object.entries(channelScores).sort((a, b) => b[1] - a[1]);
+      const ranked = Array.from(channelScores).sort((a, b) => b[1] - a[1]);
       ranked.forEach(([docId], position) => {
         const rank = position + 1;
-        scores[docId] = (scores[docId] || 0) + channelWeight / (rrfK + rank);
+        scores.set(docId, (scores.get(docId) || 0) + channelWeight / (rrfK + rank));
       });
     };
-    addRrfScores(semanticScores, semanticWeight);
-    addRrfScores(bm25Scores, bm25Weight);
+    if (mode === "semantic") {
+      scores = semanticScores;
+    } else if (mode === "lexical") {
+      scores = bm25Scores;
+    } else {
+      addRrfScores(semanticScores, semanticWeight);
+      addRrfScores(bm25Scores, bm25Weight);
+    }
 
     // Universal exact symbol title boost: if query contains exact symbol name (e.g. 'reshape'), boost primary function
-    for (const [docId, doc] of Object.entries(index.documents)) {
-      if (scores[docId] && doc) {
+    // title_boost: "always" (legacy behaviour), "identifier" (only for code-like queries) or "off"
+    const titleBoost = hybrid.title_boost || "always";
+    const applyTitleBoost =
+      mode === "hybrid" && (titleBoost === "always" || (titleBoost === "identifier" && looksLikeIdentifier(query)));
+    for (const [docId, score] of applyTitleBoost ? Array.from(scores) : []) {
+      const doc = index.documents[docId];
+      if (score && doc) {
         const titleLower = (doc.title || "").toLowerCase();
         const parts = titleLower.split(".");
         const shortName = parts[parts.length - 1];
 
+        let boosted = score;
         for (const term of terms) {
           if (shortName === term) {
             // Give 1.5x boost if title shortName matches exact query term
-            scores[docId] *= 1.5;
+            boosted *= 1.5;
             // Additional boost for top-level functions over subclass methods
             if (doc.object_type === "function") {
-              scores[docId] *= 1.25;
+              boosted *= 1.25;
             }
           }
         }
+        scores.set(docId, boosted);
       }
     }
 
-    const sortedDocs = Object.entries(scores)
+    const sortedDocs = Array.from(scores)
       .sort(([, leftScore], [, rightScore]) => rightScore - leftScore)
       .slice(0, 50) // Cap at top 50 candidate documents
-      .map(([docId]) => index.documents[docId])
+      .map(([docId]) => {
+        const doc = index.documents[docId];
+        if (!doc) return null;
+        const matched = new Set([
+          ...(mode !== "lexical" ? decodeMatches(semanticMatched, semanticTermList, docId) : []),
+          ...(mode !== "semantic" ? decodeMatches(bm25Matched, bm25TermList, docId) : []),
+        ]);
+        return Object.assign({}, doc, { matched: Array.from(matched) });
+      })
       .filter(Boolean);
 
     // Universal Deduplication across any Sphinx documentation site
@@ -261,7 +431,9 @@
       }
 
       // 3. Skip duplicate subclass method clones sharing the exact same method shortname
-      if (doc.granularity === "object" && shortName && seenShortNames.has(shortName)) {
+      //    (dedupe: "aggressive", the original behaviour; "exact" keeps only rules 1 and 2)
+      const dedupeMode = (index.hybrid && index.hybrid.dedupe) || "aggressive";
+      if (dedupeMode === "aggressive" && doc.granularity === "object" && shortName && seenShortNames.has(shortName)) {
         const count = Array.from(seenShortNames.values()).filter((n) => n === shortName).length;
         if (count >= 1) continue;
       }
@@ -330,6 +502,11 @@
       .spladex-pagination a {
         color: var(--spladex-accent);
       }
+      .spladex-matched {
+        font-size: 0.8em;
+        opacity: 0.7;
+        margin-top: 2px;
+      }
     `;
     document.head.appendChild(style);
   }
@@ -367,6 +544,48 @@
 
   let currentPage = 1;
 
+  const ENGINE_MODES = [
+    { id: "hybrid", label: "Hybrid (SpladeX + BM25)" },
+    { id: "semantic", label: "SpladeX only" },
+    { id: "lexical", label: "BM25 only" },
+  ];
+  let currentMode = "hybrid";
+  try {
+    currentMode = window.localStorage.getItem("spladex_engine_mode") || "hybrid";
+  } catch (e) {
+    currentMode = "hybrid";
+  }
+
+  // Optional engine switch (spladex_show_engine_toggle) for demonstrations and comparisons.
+  function renderEngineToggle(container) {
+    if (!currentUiConfig.show_engine_toggle) return;
+    const bar = document.createElement("div");
+    bar.className = "spladex-engine-toggle";
+    bar.style.cssText = "display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 16px 0;";
+    bar.innerHTML = '<span style="opacity:0.7; font-size:0.85em;">Engine:</span>';
+    for (const mode of ENGINE_MODES) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = mode.label;
+      const active = mode.id === currentMode;
+      button.style.cssText =
+        "padding:4px 12px; border-radius:999px; cursor:pointer; font-size:0.85em; border:1px solid var(--spladex-accent);" +
+        (active ? "background:var(--spladex-accent); color:#fff;" : "background:transparent; color:inherit;");
+      button.addEventListener("click", () => {
+        if (mode.id === currentMode) return;
+        currentMode = mode.id;
+        try {
+          window.localStorage.setItem("spladex_engine_mode", mode.id);
+        } catch (e) {
+          /* storage unavailable: keep the choice for this page only */
+        }
+        runSearch().catch(console.error);
+      });
+      bar.appendChild(button);
+    }
+    container.appendChild(bar);
+  }
+
   function renderResults(query, results, page = 1) {
     currentPage = page;
     const container = findResultsContainer();
@@ -376,6 +595,7 @@
       <h1>Search</h1>
       <p>Search results for <code>${escapeHtml(query)}</code></p>
     `;
+    renderEngineToggle(container);
 
     if (!query.trim()) {
       container.innerHTML += "<p>Type a query in the search box.</p>";
@@ -400,9 +620,14 @@
         ? `<span class="spladex-badge">${escapeHtml(result.object_type)}</span>`
         : "";
 
+      const matchedHtml =
+        currentUiConfig.show_matched_terms && result.matched && result.matched.length
+          ? `<div class="spladex-matched">matched: ${escapeHtml(result.matched.join(", "))}</div>`
+          : "";
       item.innerHTML = `
         <a href="${escapeHtml(result.url)}">${escapeHtml(result.title)}</a>${badgeHtml}
         <div class="context">${escapeHtml(makeSnippet(result.text || ""))}</div>
+        ${matchedHtml}
       `;
 
       list.appendChild(item);
@@ -456,11 +681,57 @@
     }
   }
 
-  async function runSearch() {
-    const query = getQueryFromUrl();
+  function staticUrl(name) {
+    const urlRoot =
+      (typeof DOCUMENTATION_OPTIONS !== "undefined" && DOCUMENTATION_OPTIONS.URL_ROOT) || "";
+    return new URL(urlRoot + "_static/" + name, window.location.href).toString();
+  }
+
+  // Non-search pages only need the UI settings, which the build writes to a tiny file, so the
+  // search index is never downloaded outside the search page.
+  function loadUiConfig() {
+    return fetch(staticUrl("model_semantic_config.json"))
+      .then((response) => (response.ok ? response.json() : {}))
+      .then((config) => config.ui_config || {})
+      .catch(() => ({}));
+  }
+
+  // Search-as-you-type on the search page: re-rank with the index already in memory instead of
+  // reloading the page (which would re-fetch and re-parse the index).
+  let liveSearchBound = false;
+  function bindLiveSearch() {
+    if (liveSearchBound || currentUiConfig.enable_live_search === false) return;
+    const inputs = findSearchInputs();
+    if (!inputs.length) return;
+    liveSearchBound = true;
+    let timer = null;
+    const update = (input) => {
+      const query = input.value || "";
+      const url = new URL(window.location.href);
+      url.searchParams.set("q", query);
+      window.history.replaceState(null, "", url.toString());
+      runSearch(query).catch(console.error);
+    };
+    for (const input of inputs) {
+      input.addEventListener("input", () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => update(input), 150);
+      });
+      if (input.form) {
+        input.form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          clearTimeout(timer);
+          update(input);
+        });
+      }
+    }
+  }
+
+  async function runSearch(queryOverride) {
+    const query = typeof queryOverride === "string" ? queryOverride : getQueryFromUrl();
 
     const input = findSearchInput();
-    if (input) {
+    if (input && typeof queryOverride !== "string") {
       input.value = query;
     }
 
@@ -469,7 +740,7 @@
       return;
     }
 
-    renderLoading(query);
+    if (!indexPromise) renderLoading(query);
 
     try {
       const index = await loadIndex();
@@ -477,29 +748,31 @@
         currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
       }
       applyThemeStyles(currentUiConfig);
-      initKeyboardShortcuts(currentUiConfig);
 
       const queryAssets = await loadQueryAssets(index);
-      const results = searchLocalIndex(index, queryAssets, query, 100);
+      const results = searchLocalIndex(index, queryAssets, query, 100, currentMode);
       renderResults(query, results, 1);
+      bindLiveSearch();
     } catch (error) {
       renderError(query, error);
     }
   }
 
+  // Allow the ranking code to be exercised from Node (tests and offline evaluation).
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { identifierTokens, normaliseIndex, normaliseQueryAssets, searchLocalIndex, wordPieceTokens };
+  }
+  if (typeof document === "undefined") return;
+
   document.addEventListener("DOMContentLoaded", function () {
     const path = window.location.pathname;
 
-    // Load theme styles and keyboard shortcuts across all documentation pages if index is available
-    loadIndex()
-      .then((index) => {
-        if (index && index.ui_config) {
-          currentUiConfig = Object.assign({}, currentUiConfig, index.ui_config);
-        }
-        applyThemeStyles(currentUiConfig);
-        initKeyboardShortcuts(currentUiConfig);
-      })
-      .catch(() => {});
+    // Theme styles and keyboard shortcuts on every page come from the small config file.
+    loadUiConfig().then((uiConfig) => {
+      currentUiConfig = Object.assign({}, currentUiConfig, uiConfig);
+      applyThemeStyles(currentUiConfig);
+      initKeyboardShortcuts(currentUiConfig);
+    });
 
     // Match both html builder ("…/search.html") and dirhtml builder ("…/search/")
     if (path.endsWith("search.html") || path.endsWith("/search/") || path.endsWith("/search")) {
